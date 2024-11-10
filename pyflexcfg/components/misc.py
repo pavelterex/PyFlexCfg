@@ -4,6 +4,7 @@ from typing import Any
 class AttrDict(dict):
     """
     Implementation of a dict class, which is also able to operate with attributes in an object-like manner.
+
     Since _setitem_ and _getitem_ methods aren't overridden, it can be inherited from a dict class, having all its
     under-the-hood optimisations, instead of inheriting from UserDict class which is less optimised.
     """
