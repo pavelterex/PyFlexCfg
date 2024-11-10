@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "pyflexcfg"
+version = "0.2.0"
+description = "Flexible configuration handler for Python projects."
+authors = ["Pavel T <pavelterex@gmail.com>"]
+license = "MIT license"
+readme = "README.md"
+repository = "https://github.com/pavelterex/PyFlexCfg"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+cryptography = "^43.0.3"
+pyyaml = "^6.0.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.3"
+pytest-assume = "^2.4.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
