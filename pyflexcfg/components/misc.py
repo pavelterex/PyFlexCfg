@@ -23,10 +23,7 @@ class AttrDict(dict):
 
 
 class Secret(str):
-    """ Simple implementation of secret string with masked output. """
+    """ Simple implementation of secret string with masked output in logs and console. """
 
     def __repr__(self) -> str:
-        return '********'
-
-    def __str__(self) -> str:
         return '********'

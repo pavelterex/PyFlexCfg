@@ -16,15 +16,15 @@ class HandlerMeta(type):
     General purpose is to load values from existing configuration files while being imported,
     so no additional initialization is required.
     """
-    config_root = os.getenv(ROOT_CONFIG_PATH_ENV, Path.cwd() / ROOT_CONFIG_DIR_NAME)
 
     def __new__(cls, name, bases, namespace):
+        config_root = os.getenv(ROOT_CONFIG_PATH_ENV, Path.cwd() / ROOT_CONFIG_DIR_NAME)
         init_attrs = AttrDict(namespace)
 
-        if not cls.config_root.exists():
-            raise RuntimeError(f'Configuration root path {cls.config_root} is not found!')
+        if not config_root.exists():
+            raise RuntimeError(f'Configuration root path {config_root} is not found!')
 
-        cls.load_config(cls.config_root, init_attrs)
+        cls.load_config(config_root, init_attrs)
         return super().__new__(cls, name, bases, init_attrs)
 
     def __str__(cls):

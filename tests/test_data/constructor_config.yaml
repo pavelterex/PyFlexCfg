@@ -1,9 +1,0 @@
-# string constructor data
-string_result: !string ['This', ' is', ' a', ' test', ' string']
-
-# path_win constructor data
-path_win_result: !path_win ['C:\', Test, files, test_file.txt]
-
-# path_posix constructor data
-path_posix_result: !path_posix [/var, log, test.log]
-
