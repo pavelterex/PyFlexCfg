@@ -4,7 +4,16 @@ Flexible configuration handler for Python projects.
 
 ### Description
 
-The handler (a.k.a. Cfg) allows to store project's configuration in YAML files and load them at once when imported.
+**PyFlexCfg** allows you to store your project's configuration in YAML files and seamlessly load them as a unified object 
+when imported into your Python code.
+
+### Features:
+
+- **YAML-based config**: Organize your project's settings using easy-to-read YAML files within nested 
+directories to logically group your configurations.
+- **Unified Access**: Load all configuration files as a single object for easy access.
+- **Values Override**: Dynamically override configuration values using environment variables.
+- **Secrets Management**: Encrypt and decrypt sensitive data directly within your configuration files.
 
 ### Installation
 
@@ -14,81 +23,108 @@ pip install pyflexcfg
 
 ### Configuration
 
-In order to use encryption\decryption for configuration secrets, make sure to
-set an environment variable **PYFLEX_CFG_KEY** with some encryption key, which will be
-used for secrets encryption\decryption.
+There are several environment variables that could be set in order to adjust PyFlexCfg behaviour:
 
-By default, Cfg searches for configuration files in the **config** directory
-within current working dir. In order to specify a different path, crate a nenv variable
-**PYFLEX_CFG_ROOT_PATH** with the absolute path to the configuration root.
+1. By default, PyFlexCfg looks for configuration files in a directory **config** within the current working directory. 
+To specify a different path, define an environment variable with the absolute path to the desired configuration root 
+directory:
+    ```shell
+    PYFLEX_CFG_ROOT_PATH=\path\to\config
+    ```
+
+2. In order to use encrypted configuration values, you must set an environment variable with encryption key, which 
+will be used for secrets decryption:
+    ```shell
+    PYFLEX_CFG_KEY=super_secret_key
+    ```
+
 
 ### Basic Usage
 
-Assuming you have such configuration files structure:
+Assuming the following configuration file structure:
 ```
-    \project
+    \project  <-- working directory
         ├─ config
             ├─ general.yaml
             ├─ env
                 ├─ dev.yaml
                 ├─ prd.yaml
    ```
-And each of the yaml files contains a configuration option **data: test**
-
-Just import the Cfg and you can use your configuration at once:
+And each YAML file contains a configuration option like this:
+```yaml
+data: test
+```
+You can load and use the configurations as follows:
 
 ```python
 from pyflexcfg import Cfg
 
-print(Cfg.general.data)
-print(Cfg.env.dev.data)
-print(Cfg.env.prd.data)
+print(Cfg.general.data)  # Access data from general.yaml
+print(Cfg.env.dev.data)  # Access data from env/dev.yaml
+print(Cfg.env.prd.data)  # Access data from env/prd.yaml
 ```
 
-Make sure the names of directories within your configuration are Python object's attribute name compatible.
+**Note**: Directory and file names in your configuration structure must be compatible with Python attribute naming 
+conventions.
 
+### Overriding values with Environment Variables
 
-### Override by environment variables
+You can override values in YAML files using environment variables. To do this, create environment variables that reflect
+the configuration values you want to override. This feature is particularly useful in environments like Docker Compose, 
+where you can pass environment-specific settings to containers dynamically, enabling seamless configuration management 
+across different deployment setups.
 
-There is an option to override values in YAML files with values from environment variables.
-In order to do so, you have to create env variables which reflect the name of config value to be overwritten.
-For example, if you want to overwrite value for
+For example, if you want to overwrite the value of
 ```
 Cfg.env.dev.data
 ```
-you have to create env variable like this
+Define an environment variable:
 ```
-CFG__ENV__DEV__DATA
+CFG__ENV__DEV__DATA=some_value
 ```
-Having that, you can call 
+Having that set, call the method 
 ```python
+from pyflexcfg import Cfg
+
 Cfg.update_from_env()
 ``` 
-and the value from the YAML file will be overwritten by the value from env variable.
+The value from the environment variable will replace the corresponding value from the YAML file.
 
 
 ### Handling secrets
 
-Any sensitive data to be stored within your configuration files should be encrypted!
+Any sensitive data present in configuration files should be encrypted!
 
-Encrypt your secret:
+#### Encrypting a Secret
+
+Use the AESCipher class to encrypt your secrets:
 ```python
 from pyflexcfg import AESCipher
 
 aes = AESCipher('secret-key')
 aes.encrypt('some-secret-to-encrypt')
 ```
-You will get output like
+This will produce an output like:
 
 ```python
 b'A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI'
 ```
-and it can be stored in yaml file with **!encr** prefix:
+Store the encrypted secret in a YAML file with the **!encr** prefix:
 
 ```yaml
 my_secret: !encr b'A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI'
 ```
 
-The next time Cfg will be loading this configuration file it will automatically decrypt
-this value, but do not forget to set up env variable **PYFLEX_CFG_KEY** with your 'secret-key',
-otherwise Cfg won't be able to decrypt the data.
+#### Decrypting Secrets
+
+When PyFlexCfg loads the configuration and the environment variable **PYFLEX_CFG_KEY** is set with your encryption key, 
+it will automatically decrypt values marked with **!encr** prefix and store them in Cfg as a Secret strings, masking 
+them in logs and console outputs with ******. 
+
+Use the AESCipher class to manually decrypt your secrets if needed:
+```python
+from pyflexcfg import AESCipher
+
+aes = AESCipher('secret-key')
+aes.decrypt(b'A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI')
+```

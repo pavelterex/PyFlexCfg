@@ -1,15 +1,8 @@
-from pathlib import Path
+import os
 
-import pytest
+from pyflexcfg.components.constants import ENCRYPTION_KEY_ENV_VAR
 
-# from pyflexcfg.components.constants import ENCRYPTION_KEY_ENV_VAR, ROOT_CONFIG_PATH_ENV
-
-
-# @pytest.fixture
-# def env_key(monkeypatch):
-#     monkeypatch.setenv(ENCRYPTION_KEY_ENV_VAR, '1234')
-#
-#
-# @pytest.fixture(autouse=True)
-# def test_config(monkeypatch):
-#     monkeypatch.setenv(ROOT_CONFIG_PATH_ENV, str(Path(Path.cwd() / 'tests' / 'test_data' / 'test_config')))
+TEST_KEY = os.getenv(ENCRYPTION_KEY_ENV_VAR)
+TEST_STRING = 'some-secret-string'
+TEST_ENCRYPTED_BYTES = b'u8euuCiFlgzpI2aY6/vYtJbQ4ApNbqtnwTjYVJ/APs2aRVD8XbC6tiEsmrcKjqXd'
+TEST_ENCRYPTED_STRING = 'u8euuCiFlgzpI2aY6/vYtJbQ4ApNbqtnwTjYVJ/APs2aRVD8XbC6tiEsmrcKjqXd'

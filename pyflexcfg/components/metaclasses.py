@@ -17,14 +17,15 @@ class HandlerMeta(type):
     so no additional initialization is required.
     """
 
+    config_root = Path(os.getenv(ROOT_CONFIG_PATH_ENV, Path.cwd() / ROOT_CONFIG_DIR_NAME))
+
     def __new__(cls, name, bases, namespace):
-        config_root = os.getenv(ROOT_CONFIG_PATH_ENV, Path.cwd() / ROOT_CONFIG_DIR_NAME)
         init_attrs = AttrDict(namespace)
 
-        if not config_root.exists():
-            raise RuntimeError(f'Configuration root path {config_root} is not found!')
+        if not cls.config_root.exists():
+            raise RuntimeError(f'Configuration root path {cls.config_root} is not found!')
 
-        cls.load_config(config_root, init_attrs)
+        cls._preload_config(cls.config_root, init_attrs)
         return super().__new__(cls, name, bases, init_attrs)
 
     def __str__(cls):
@@ -33,20 +34,20 @@ class HandlerMeta(type):
         return str(dct)
 
     @classmethod
-    def to_attrdict(cls, data: AnyStr | AttrDict | Sequence) -> AnyStr | AttrDict | Sequence:
+    def _to_attrdict(cls, data: AnyStr | AttrDict | Sequence) -> AnyStr | AttrDict | Sequence:
         if isinstance(data, dict):
             for key, value in data.items():
-                data[key] = cls.to_attrdict(value)
+                data[key] = cls._to_attrdict(value)
             data = AttrDict(**data)
 
         elif isinstance(data, list | tuple):
             for index, item in enumerate(data):
-                data[index] = cls.to_attrdict(item)
+                data[index] = cls._to_attrdict(item)
 
         return data
 
     @classmethod
-    def load_config(cls, config_path: Path, dct: AttrDict) -> None:
+    def _preload_config(cls, config_path: Path, dct: AttrDict) -> None:
         """
         Traverse root config dir recursively and update given AttrDict with loaded YAML files' values.
 
@@ -59,7 +60,7 @@ class HandlerMeta(type):
                     dct[item.name] = AttrDict()
                 except KeyError:
                     raise RuntimeError(f'Directory "{item.name}" is not valid for namespace assignment!')
-                cls.load_config(item, dct[item.name])
+                cls._preload_config(item, dct[item.name])
 
             if item.suffix in ('.yml', '.yaml'):
                 cls._load_yaml_from_file(dct, item)
@@ -67,5 +68,5 @@ class HandlerMeta(type):
     @classmethod
     def _load_yaml_from_file(cls, dct: AttrDict | object, file: Path) -> None:
         with file.open() as cfg_file:
-            data = cls.to_attrdict(yaml.load(cfg_file, YamlLoader))
+            data = cls._to_attrdict(yaml.load(cfg_file, YamlLoader))
             setattr(dct, file.stem, data)

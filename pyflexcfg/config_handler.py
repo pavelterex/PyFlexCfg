@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from .components import log
 from .components.metaclasses import HandlerMeta
@@ -6,11 +7,30 @@ from .components.misc import AttrDict, Secret
 
 
 class ConfigHandler(AttrDict, metaclass=HandlerMeta):
+    @classmethod
+    def reload_config(cls, config_path: Path = None, dct: AttrDict = None):
+        """ Update Cfg with values from configuration files in the config directory recursively. """
+
+        config_path = config_path or cls.config_root
+        dct = dct or cls
+
+        for key in [k for k, v in cls.__dict__.items() if isinstance(v, AttrDict)]:
+            delattr(cls, key)
+
+        for item in config_path.iterdir():
+            if item.is_dir():
+                try:
+                    dct[item.name] = AttrDict()
+                except KeyError:
+                    raise RuntimeError(f'Directory "{item.name}" is not valid for namespace assignment!')
+                cls.reload_config(item, dct[item.name])
+
+            if item.suffix in ('.yml', '.yaml'):
+                cls._load_yaml_from_file(dct, item)
 
     @classmethod
     def update_from_env(cls) -> None:
-        """ Override existing config values with ones loaded from env variables. """
-
+        """ Override config values loaded from yaml with ones from env variables. """
         for var_name, var_value in os.environ.items():
             var_name = var_name.lower()
 
