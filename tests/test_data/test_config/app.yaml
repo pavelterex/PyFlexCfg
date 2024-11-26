@@ -1,0 +1,55 @@
+general:
+  var_str: test
+  var_empty_str: ''
+  var_secret_str: !encr u8euuCiFlgzpI2aY6/vYtJbQ4ApNbqtnwTjYVJ/APs2aRVD8XbC6tiEsmrcKjqXd
+  var_int: 500
+  var_float: 10.5
+  var_bool_true: true
+  var_bool_false: false
+  var_null:
+
+collections:
+  var_list:
+    - value1
+    - value2
+    - value3
+
+  var_dict:
+    key1: value1
+    key2: value2
+    key3: value3
+
+nested:
+  var_nested_list1:
+    - - subvalue1
+      - subvalue2
+    - - subvalue1
+      - subvalue2
+
+  var_nested_list2:
+    - [subvalue1, subvalue2]
+    - [subvalue1, subvalue2]
+
+  var_nested_dict1:
+    subdict1:
+      key1: value1
+      key2: value2
+    subdict2:
+      key1: value1
+      key2: value2
+
+  var_nested_dict2:
+    subdict1: {key1: value1, key2: value2}
+    subdict2: {key1: value1, key2: value2}
+
+anchor:
+  var_base: &base 'base'
+  var_value: [*base, 'value']
+
+merge:
+  var_base: &base_dict
+    key1: value1
+
+  var_merge:
+    <<: *base_dict
+    key2: value2

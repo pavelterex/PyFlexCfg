@@ -1,0 +1,4 @@
+string: !string ['This', ' is', ' a', ' test', ' string']
+path_win: !path_win ['C:\', Test, files, test_file.txt]
+path_posix: !path_posix [/var, log, test.log]
+

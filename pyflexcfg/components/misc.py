@@ -8,7 +8,6 @@ class AttrDict(dict):
     Since _setitem_ and _getitem_ methods aren't overridden, it can be inherited from a dict class, having all its
     under-the-hood optimisations, instead of inheriting from UserDict class which is less optimised.
     """
-
     def __getattr__(self, name: str) -> Any:
         try:
             value = self[name]
@@ -23,10 +22,6 @@ class AttrDict(dict):
 
 
 class Secret(str):
-    """ Simple implementation of secret string with masked output. """
-
+    """ Simple implementation of secret string with masked output in logs and console. """
     def __repr__(self) -> str:
-        return '********'
-
-    def __str__(self) -> str:
         return '********'

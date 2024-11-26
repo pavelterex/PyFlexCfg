@@ -1,12 +1,8 @@
 import pytest
 from pytest_assume.plugin import assume
 
+from conftest import TEST_KEY, TEST_STRING, TEST_ENCRYPTED_STRING, TEST_ENCRYPTED_BYTES
 from pyflexcfg.components.encryption import AESCipher
-
-TEST_KEY = '1234'
-TEST_STRING = 'some-secret-string'
-TEST_ENCRYPTED_BYTES = b'u8euuCiFlgzpI2aY6/vYtJbQ4ApNbqtnwTjYVJ/APs2aRVD8XbC6tiEsmrcKjqXd'
-TEST_ENCRYPTED_STRING = 'u8euuCiFlgzpI2aY6/vYtJbQ4ApNbqtnwTjYVJ/APs2aRVD8XbC6tiEsmrcKjqXd'
 
 
 @pytest.fixture(scope='module')
