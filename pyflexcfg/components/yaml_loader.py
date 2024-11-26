@@ -12,7 +12,6 @@ from .misc import Secret
 
 class YamlLoader(Loader):
     """ Customized loader for YAML files. """
-
     def __init__(self, *args, **kwargs):
         self._cipher: Optional[ICipher] = None
         super().__init__(*args, **kwargs)

@@ -41,3 +41,15 @@ nested:
   var_nested_dict2:
     subdict1: {key1: value1, key2: value2}
     subdict2: {key1: value1, key2: value2}
+
+anchor:
+  var_base: &base 'base'
+  var_value: [*base, 'value']
+
+merge:
+  var_base: &base_dict
+    key1: value1
+
+  var_merge:
+    <<: *base_dict
+    key2: value2

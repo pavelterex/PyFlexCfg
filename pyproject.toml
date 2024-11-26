@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "pyflexcfg"
-version = "0.3.0"
-description = "Flexible configuration handler for Python projects."
+version = "0.5.0"
+description = "Simple and flexible configuration handler for Python projects."
 authors = ["Pavel T <pavelterex@gmail.com>"]
 license = "MIT license"
 readme = "README.md"

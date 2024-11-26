@@ -1,32 +1,29 @@
 import os
 from pathlib import Path
 
-from .components import log
+from .components import logger
 from .components.metaclasses import HandlerMeta
 from .components.misc import AttrDict, Secret
 
 
 class ConfigHandler(AttrDict, metaclass=HandlerMeta):
     @classmethod
-    def reload_config(cls, config_path: Path = None, dct: AttrDict = None):
-        """ Update Cfg with values from configuration files in the config directory recursively. """
+    def reload_config(cls, config_path: Path = None, dct: AttrDict = None, reset: bool = True):
+        """
+        Update Cfg with values from configuration files in the config directory tree recursively.
 
+        :param config_path: root dir of the configuration tree to be traversed recursively
+        :param dct: the AttrDict object to apply loaded configuration to
+        :param reset: whether to retain existing params and update them or load config into an empty AttrDict
+        """
         config_path = config_path or cls.config_root
         dct = dct or cls
 
-        for key in [k for k, v in cls.__dict__.items() if isinstance(v, AttrDict)]:
-            delattr(cls, key)
+        if reset:
+            for key in [k for k, v in cls.__dict__.items() if isinstance(v, AttrDict)]:
+                delattr(cls, key)
 
-        for item in config_path.iterdir():
-            if item.is_dir():
-                try:
-                    dct[item.name] = AttrDict()
-                except KeyError:
-                    raise RuntimeError(f'Directory "{item.name}" is not valid for namespace assignment!')
-                cls.reload_config(item, dct[item.name])
-
-            if item.suffix in ('.yml', '.yaml'):
-                cls._load_yaml_from_file(dct, item)
+        cls._load_config(config_path, dct)
 
     @classmethod
     def update_from_env(cls) -> None:
@@ -43,14 +40,14 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                     try:
                         current = getattr(current, key)
                     except AttributeError:
-                        log.error(f'Key "{key}" is not found. Skipping override by "{var_name.upper()}"')
+                        logger.error(f'Key "{key}" is not found. Skipping override by "{var_name.upper()}"')
                         current = None
                         break
                 try:
                     current[dct_keys[-1]] = var_value
                 except TypeError:
                     if current is not None:
-                        log.error(
+                        logger.error(
                             f'Key "{dct_keys[-1]}" could not be assigned. Skipping override by "{var_name.upper()}"'
                         )
 
@@ -79,20 +76,20 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             if value_type not in allowed_types:
                 msg = (f'Specified type "{value_type}" is not in the list of allowed types!'
                        f'Value "{value}" will be processed with auto-conversion')
-                log.warn(msg)
+                logger.warn(msg)
                 src_value = value
             else:
                 try:
                     return eval(value_type)(value)
                 except ValueError:
-                    log.debug(f'Value "{value}" could not be casted as "{value_type}"')
+                    logger.debug(f'Value "{value}" could not be casted as "{value_type}"')
 
         # process auto-conversion to int or float
         for item in (int, float):
             try:
                 return item(src_value)
             except ValueError:
-                log.debug(f'Value "{src_value}" could not be casted as "{item}"')
+                logger.debug(f'Value "{src_value}" could not be casted as "{item}"')
 
         # process auto-conversion to bool
         if (var_lower := src_value.lower()) in ('true', 'false'):

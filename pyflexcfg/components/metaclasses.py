@@ -1,10 +1,12 @@
 import os
+import re
 from pathlib import Path
 from typing import AnyStr, Sequence
 
 import yaml
 
-from .constants import ROOT_CONFIG_DIR_NAME, ROOT_CONFIG_PATH_ENV
+from . import logger
+from .constants import NAME_REGEX_STRING, ROOT_CONFIG_DIR_NAME, ROOT_CONFIG_PATH_ENV
 from .misc import AttrDict
 from .yaml_loader import YamlLoader
 
@@ -25,7 +27,7 @@ class HandlerMeta(type):
         if not cls.config_root.exists():
             raise RuntimeError(f'Configuration root path {cls.config_root} is not found!')
 
-        cls._preload_config(cls.config_root, init_attrs)
+        cls._load_config(cls.config_root, init_attrs)
         return super().__new__(cls, name, bases, init_attrs)
 
     def __str__(cls):
@@ -47,26 +49,34 @@ class HandlerMeta(type):
         return data
 
     @classmethod
-    def _preload_config(cls, config_path: Path, dct: AttrDict) -> None:
+    def _load_config(cls, config_path: Path, dct: AttrDict) -> None:
         """
         Traverse root config dir recursively and update given AttrDict with loaded YAML files' values.
 
         :param config_path: root directory of configuration
         :param dct: AttrDict instance to be updated with loaded values
         """
-        for item in config_path.iterdir():
-            if item.is_dir():
-                try:
-                    dct[item.name] = AttrDict()
-                except KeyError:
-                    raise RuntimeError(f'Directory "{item.name}" is not valid for namespace assignment!')
-                cls._preload_config(item, dct[item.name])
+        if not config_path.is_dir():
+            raise AttributeError(f'{config_path} must be a path to directory!')
 
-            if item.suffix in ('.yml', '.yaml'):
-                cls._load_yaml_from_file(dct, item)
+        for item in config_path.iterdir():
+            match item:
+                case _ if item.is_dir() and re.match(re.compile(NAME_REGEX_STRING), item.name):
+                    dct[item.name] = AttrDict()
+                    cls._load_config(item, dct[item.name])
+                case _ if item.is_file() and item.suffix in {'.yml', '.yaml'}:
+                    cls._load_yaml_file(dct, item)
+                case _:
+                    if item.is_dir():
+                        logger.error(f'Directory "{item.name}" is not valid for namespace assignment!')
+                    elif item.is_file():
+                        logger.error(f'File "{item.name}" is not a supported configuration file!')
+                    else:
+                        logger.warning(f'Unknown item "{item.name}" skipped.')
 
     @classmethod
-    def _load_yaml_from_file(cls, dct: AttrDict | object, file: Path) -> None:
+    def _load_yaml_file(cls, dct: AttrDict | object, file: Path) -> None:
         with file.open() as cfg_file:
             data = cls._to_attrdict(yaml.load(cfg_file, YamlLoader))
             setattr(dct, file.stem, data)
+            logger.debug(f'Configuration from the file "{file}" has been successfully loaded')
