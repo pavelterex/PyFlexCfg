@@ -1,9 +1,13 @@
 # string constructor data
 string_result: !string ['This', ' is', ' a', ' test', ' string']
 
-# path_win constructor data
+# legacy path constructors (return Pure variants regardless of host)
 path_win_result: !path_win ['C:\', Test, files, test_file.txt]
-
-# path_posix constructor data
 path_posix_result: !path_posix [/var, log, test.log]
 
+# new constructors
+path_result: !path [tmp, app, data]
+pure_path_result: !pure_path [tmp, app, data]
+pure_path_posix_result: !pure_path_posix [/var, log, app.log]
+pure_path_win_result: !pure_path_win ['C:\', Program Files, App, run.exe]
+home_dir_result: !home_dir [subdir, file.txt]
