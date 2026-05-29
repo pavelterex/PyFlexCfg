@@ -1,4 +1,8 @@
 string: !string ['This', ' is', ' a', ' test', ' string']
 path_win: !path_win ['C:\', Test, files, test_file.txt]
 path_posix: !path_posix [/var, log, test.log]
-
+path: !path [tmp, app, data]
+pure_path: !pure_path [tmp, app, data]
+pure_path_posix: !pure_path_posix [/var, log, app.log]
+pure_path_win: !pure_path_win ['C:\', Program Files, App, run.exe]
+home_dir: !home_dir [subdir, file.txt]

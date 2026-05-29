@@ -1,55 +1,77 @@
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath, PurePath
-from typing import Optional
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 from yaml import Loader, ScalarNode, SequenceNode
 
 from .abstractclasses import ICipher
-from .constants import ENCRYPTION_KEY_ENV_VAR
+from .constants import ENCRYPTION_KEY_ENV_VAR, PROJECT_ROOT_PATH_ENV, ROOT_CONFIG_PATH_ENV
 from .encryption import AESCipher
 from .misc import Secret
 
 
 class YamlLoader(Loader):
-    """ Customized loader for YAML files. """
-    def __init__(self, *args, **kwargs):
-        self._cipher: Optional[ICipher] = None
+    """
+    Custom YAML loader registering PyFlexCfg's tag set.
+
+    The `!proj_root` tag is resolved via :attr:`project_root`, a class attribute
+    set by :class:`HandlerMeta` before any YAML file is parsed.
+    """
+
+    project_root: Path | None = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._cipher: ICipher | None = None
         super().__init__(*args, **kwargs)
 
-        def string(loader: Loader, node: SequenceNode) -> str:
-            """ String-like constructor, combines parts as a string. """
-            seq = loader.construct_sequence(node)
-            return ''.join([str(i) for i in seq])
+        def encrypted(loader: Loader, node: ScalarNode) -> Secret:
+            return Secret(self.cipher.decrypt(loader.construct_scalar(node)))
 
-        def path_win(loader: Loader, node: SequenceNode) -> PureWindowsPath:
-            """ Path-like constructor, combines parts as a Windows path. """
-            seq = loader.construct_sequence(node)
-            return PureWindowsPath(*seq)
+        def home_dir(loader: Loader, node: SequenceNode) -> Path:
+            return Path(Path.home(), *loader.construct_sequence(node))
+
+        def path(loader: Loader, node: SequenceNode) -> Path:
+            return Path(*loader.construct_sequence(node))
 
         def path_posix(loader: Loader, node: SequenceNode) -> PurePosixPath:
-            """ Path-like constructor, combines parts as a Posix path. """
-            seq = loader.construct_sequence(node)
-            return PurePosixPath(*seq)
+            return PurePosixPath(*loader.construct_sequence(node))
 
-        def home_dir(loader: Loader, node: SequenceNode) -> PurePath:
-            """ Constructor for paths (both Windows and Posix), starting from User's HOME directory. """
-            _home = Path.home()
-            seq = loader.construct_sequence(node)
-            return PurePath(_home, *seq)
+        def path_win(loader: Loader, node: SequenceNode) -> PureWindowsPath:
+            return PureWindowsPath(*loader.construct_sequence(node))
 
-        def encrypted(loader: Loader, node: ScalarNode) -> str:
-            """ Constructor for encrypted data (strings and bytes). """
-            encr_value = loader.construct_scalar(node)
-            return Secret(self.cipher.decrypt(encr_value))
+        def proj_root(loader: Loader, node: SequenceNode) -> Path:
+            if YamlLoader.project_root is None:
+                raise RuntimeError(
+                    f'!proj_root cannot be resolved: {ROOT_CONFIG_PATH_ENV} is set but {PROJECT_ROOT_PATH_ENV} is not.'
+                    f' Set the latter to the project root or stop using !proj_root in this config.',
+                )
 
-        self.add_constructor('!string', string)
-        self.add_constructor('!path_win', path_win)
-        self.add_constructor('!path_posix', path_posix)
-        self.add_constructor('!home_dir', home_dir)
+            return Path(YamlLoader.project_root, *loader.construct_sequence(node))
+
+        def pure_path(loader: Loader, node: SequenceNode) -> PurePath:
+            return PurePath(*loader.construct_sequence(node))
+
+        def pure_path_posix(loader: Loader, node: SequenceNode) -> PurePosixPath:
+            return PurePosixPath(*loader.construct_sequence(node))
+
+        def pure_path_win(loader: Loader, node: SequenceNode) -> PureWindowsPath:
+            return PureWindowsPath(*loader.construct_sequence(node))
+
+        def string(loader: Loader, node: SequenceNode) -> str:
+            return ''.join(str(i) for i in loader.construct_sequence(node))
+
         self.add_constructor('!encr', encrypted)
+        self.add_constructor('!home_dir', home_dir)
+        self.add_constructor('!path', path)
+        self.add_constructor('!path_posix', path_posix)
+        self.add_constructor('!path_win', path_win)
+        self.add_constructor('!proj_root', proj_root)
+        self.add_constructor('!pure_path', pure_path)
+        self.add_constructor('!pure_path_posix', pure_path_posix)
+        self.add_constructor('!pure_path_win', pure_path_win)
+        self.add_constructor('!string', string)
 
     @property
-    def cipher(self):
+    def cipher(self) -> ICipher:
         if not self._cipher:
             if (key := os.getenv(ENCRYPTION_KEY_ENV_VAR)) is None:
                 raise RuntimeError(f'Env variable {ENCRYPTION_KEY_ENV_VAR} is not found!')
