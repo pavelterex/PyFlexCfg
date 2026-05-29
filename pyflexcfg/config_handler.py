@@ -17,7 +17,7 @@ _MERGE_SUFFIXES = {'yaml_m'}
 
 
 def _parse_yaml(value: str) -> Any:
-    return yaml.load(value, YamlLoader)
+    return yaml.safe_load(value)
 
 
 def _to_bool(value: str) -> bool:
@@ -73,14 +73,16 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             raise RuntimeError(f'Configuration root path {path} is not found!')
 
         cls.config_root = path
-        cls.project_root = project_root if project_root is not None else HandlerMeta.resolve_project_root()
+        HandlerMeta.load_env_files(path)
+        cls.project_root = project_root if project_root is not None else HandlerMeta.resolve_project_root(
+            custom_root=config_path is not None,
+        )
         YamlLoader.project_root = cls.project_root
 
         if reset:
             for key in [k for k, v in list(cls.__dict__.items()) if isinstance(v, AttrDict)]:
                 delattr(cls, key)
 
-        HandlerMeta.load_env_files(path)
         loaded = AttrDict()
         HandlerMeta.load_config(path, loaded)
 

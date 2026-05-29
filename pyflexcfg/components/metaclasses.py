@@ -37,10 +37,10 @@ class HandlerMeta(type):
         if not cls.config_root.exists():
             raise RuntimeError(f'Configuration root path {cls.config_root} is not found!')
 
+        cls.load_env_files(cls.config_root)
         cls.project_root = cls.resolve_project_root()
         YamlLoader.project_root = cls.project_root
 
-        cls.load_env_files(cls.config_root)
         cls.load_config(cls.config_root, init_attrs)
 
         return super().__new__(cls, name, bases, init_attrs)
@@ -99,17 +99,24 @@ class HandlerMeta(type):
                 logger.debug('Loaded env file: %s', item)
 
     @classmethod
-    def resolve_project_root(cls) -> Path | None:
+    def resolve_project_root(cls, custom_root: bool = False) -> Path | None:
         """
         Resolve the project root from environment variables.
 
         Precedence:
             1. `PYFLEX_PROJECT_ROOT_PATH` if set — used verbatim.
-            2. `Path.cwd()` when `PYFLEX_CFG_ROOT_PATH` is **not** set
-               (default layout: `./config` sits inside the project root).
-            3. `None` when `PYFLEX_CFG_ROOT_PATH` is set but no explicit
-               project root is provided. `!proj_root` raises in this case;
-               configs that don't use the tag are unaffected.
+            2. `Path.cwd()` when neither `PYFLEX_CFG_ROOT_PATH` nor
+               `custom_root` signals a non-default config location (default
+               layout: `./config` sits inside the project root).
+            3. `None` otherwise — `!proj_root` raises at parse time; configs
+               that don't use the tag are unaffected.
+
+        Args:
+            custom_root: Pass `True` when the config path was supplied
+                explicitly (e.g. via the `config_path` kwarg of
+                `reload_config`). Suppresses the `Path.cwd()` fallback so
+                that callers in non-default layouts must provide an explicit
+                project root.
 
         Returns:
             The resolved project root, or `None` if it cannot be inferred.
@@ -117,7 +124,7 @@ class HandlerMeta(type):
         if explicit := os.getenv(PROJECT_ROOT_PATH_ENV):
             return Path(explicit)
 
-        if not os.getenv(ROOT_CONFIG_PATH_ENV):
+        if not custom_root and not os.getenv(ROOT_CONFIG_PATH_ENV):
             return Path.cwd()
 
         return None
