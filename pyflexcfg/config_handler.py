@@ -74,8 +74,12 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
 
         cls.config_root = path
         HandlerMeta.load_env_files(path)
-        cls.project_root = project_root if project_root is not None else HandlerMeta.resolve_project_root(
-            custom_root=config_path is not None,
+        cls.project_root = (
+            project_root
+            if project_root is not None
+            else HandlerMeta.resolve_project_root(
+                custom_root=config_path is not None,
+            )
         )
         YamlLoader.project_root = cls.project_root
 
