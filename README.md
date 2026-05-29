@@ -1,248 +1,203 @@
 # PyFlexCfg
 
-Simple and flexible configuration handler for Python projects.
+Flexible YAML configuration handler for Python projects. PyFlexCfg loads a directory tree of YAML files
+into a single global `Cfg` object at import time, with support for environment-variable overrides,
+encrypted secrets, custom path constructors, and automatic `.env` loading.
 
-### Contents
-1. [Description](#description)
-2. [Features](#features)
-3. [Installation](#installation)
-4. [Configuration](#configuration)
-   - [General](#general)
-   - [Logging](#logging)
-5. [Basic Usage](#basic-usage)
-6. [Overriding values](#overriding-values)
+The handler is built on **PyYAML** for low dependency footprint and fast loading. YAML 1.2 features are
+not guaranteed to load properly.
+
+## Contents
+
+1. [Installation](#installation)
+2. [Quick start](#quick-start)
+3. [Configuration root and project root](#configuration-root-and-project-root)
+4. [`.env` files](#env-files)
+5. [Environment-variable overrides](#environment-variable-overrides)
+6. [Custom YAML constructors](#custom-yaml-constructors)
 7. [Handling secrets](#handling-secrets)
-   - [Encrypting secrets](#encrypting-secrets)
-   - [Decrypting secrets](#decrypting-secrets)
-8. [Additional constructors](#additional-constructors)
-   - [String constructor](#string-constructor)
-   - [Paths constructors](#paths-constructors)
+8. [Runtime reload](#runtime-reload)
+9. [Logging](#logging)
+10. [Development](#development)
 
-### Description
-
-**PyFlexCfg** allows you to store your project's configuration in YAML files and seamlessly load them as a unified 
-object when imported into your Python code.
-
-The handler is using **PyYAML** library for handling YAML files due to its lower dependencies footprint and loading 
-speed, therefore YAML files of version 1.2 might not be loaded properly.
-
-### Features:
-
-- **YAML config**: Organize your project's settings using easy-to-read YAML files within nested 
-directories to logically group your configurations.
-- **Unified Access**: Load all configuration files as a single object for easy access.
-- **Values Override**: Dynamically override configuration values using environment variables.
-- **Secrets Management**: Encrypt and decrypt sensitive data directly within your configuration files
-- **Additional constructors**: several custom YAML constructors to expand functionality of the configuration.
-
-### Installation
+## Installation
 
 ```shell
 pip install pyflexcfg
 ```
 
-### Configuration
+## Quick start
 
-#### General
+Given this layout:
 
-There are several options that could be set as an environment variable in order to adjust PyFlexCfg behaviour:
+```text
+project/
+├── config/
+│   ├── general.yaml
+│   └── env/
+│       ├── dev.yaml
+│       └── prd.yaml
+```
 
-1. By default, **PyFlexCfg** looks for configuration files in a directory **config** within the current working directory. 
-To specify a different path, define an environment variable with the absolute path to the desired configuration root 
-directory:
-    ```shell
-    PYFLEX_CFG_ROOT_PATH=/path/to/config
-    ```
+with each file containing `data: test`, you can use the configuration immediately after import:
 
-2. In order to use encrypted configuration values, you must set an environment variable with encryption key, which 
-will be used for secrets decryption:
-    ```shell
-    PYFLEX_CFG_KEY=super_secret_key
-    ```
+```python
+from pyflexcfg import Cfg
 
-#### Logging
+print(Cfg.general.data)
+print(Cfg.env.dev.data)
+print(Cfg.env.prd.data)
+```
 
-In case you want to enable logging for the handler you can get the appropriate logger by executing:
+Directory and file names must match the regex `^[a-z][a-z0-9_]{0,28}[a-z0-9]$` — names that don't match
+are silently skipped during loading. Top-level value names inside YAML files become attribute names on
+the loaded object, so they must also be valid Python identifiers if you want dot-notation access.
+
+## Configuration root and project root
+
+PyFlexCfg distinguishes two paths:
+
+- **Config root** — the directory it walks for YAML files. Defaults to `./config` relative to the
+  current working directory. Override with `PYFLEX_CFG_ROOT_PATH` (absolute path).
+- **Project root** — the anchor used by the `!proj_root` YAML constructor. Resolved as follows:
+  1. `PYFLEX_PROJECT_ROOT_PATH` env var, if set — used verbatim.
+  2. `Path.cwd()` when `PYFLEX_CFG_ROOT_PATH` is **not** set (default layout: `./config` lives
+     inside the project root, so cwd *is* the project root).
+  3. Otherwise (custom config root, no project-root env var) — **unresolved**. Loading a YAML that
+     uses `!proj_root` will raise `RuntimeError`. Configs that don't use the tag are unaffected.
+
+In short: **if you set `PYFLEX_CFG_ROOT_PATH`, you must also set `PYFLEX_PROJECT_ROOT_PATH`
+whenever your config uses `!proj_root`.** The default layout requires neither.
+
+## `.env` files
+
+Any `*.env` file found directly inside the config root (non-recursive) is loaded via
+[`python-dotenv`](https://pypi.org/project/python-dotenv/) *before* YAML parsing. This lets you set
+both `PYFLEX_CFG_KEY` and any `CFG__…` overrides without touching the shell environment. `.env`
+files are not parsed as YAML and not exposed as `Cfg.<name>` attributes.
+
+## Environment-variable overrides
+
+Variables matching `CFG__SECTION__KEY` override `Cfg.section.key`. `Cfg.update_from_env()` is called
+automatically at import, but you can call it again at any point (for example, after mutating env vars in
+a test). Values are auto-coerced as `int` → `float` → `bool` → `str`. Force a specific type with a
+trailing `::Type` suffix:
+
+| Suffix      | Result                                                                            |
+|-------------|-----------------------------------------------------------------------------------|
+| `::int`     | Python `int`                                                                      |
+| `::float`   | Python `float`                                                                    |
+| `::bool`    | `true`/`false` → `bool`                                                           |
+| `::str`     | Force string, no auto-coercion                                                    |
+| `::Secret`  | Wrap as `Secret` (masked in logs/repr)                                            |
+| `::yaml_r`  | Parse as YAML, **replace** the existing value wholesale (works for any YAML type) |
+| `::yaml_m`  | Parse as YAML, **merge** into the existing dict (only when both sides are dicts)  |
+
+Examples:
+
+```dotenv
+CFG__DB__PORT=5432                             # int via auto-coercion
+CFG__DB__TIMEOUT=2.5                           # float via auto-coercion
+CFG__FEATURES__BETA=true                       # bool via auto-coercion
+CFG__DB__PASSWORD=hunter2::Secret              # masked Secret
+CFG__SERVERS=[host-a, host-b, host-c]::yaml_r  # list — replaces existing
+CFG__DB={port: 6543, ssl: true}::yaml_m        # dict — merged into Cfg.db
+CFG__DB={port: 6543, ssl: true}::yaml_r        # dict — wipes Cfg.db and writes only these two keys
+```
+
+`::yaml_m` falls back to replace semantics when either side is not a dict. Overrides for missing
+dotted paths are logged at DEBUG level and skipped.
+
+## Custom YAML constructors
+
+Use these tags inside any YAML file:
+
+| Tag                  | Returns           | Description                                              |
+|----------------------|-------------------|----------------------------------------------------------|
+| `!string`            | `str`             | Join sequence parts as one string.                       |
+| `!encr`              | `Secret`          | Decrypt a base64 secret using `PYFLEX_CFG_KEY`.          |
+| `!path`              | `Path`            | Host-native concrete path from the given parts.          |
+| `!home_dir`          | `Path`            | Host-native path rooted at the current user's home.      |
+| `!proj_root`         | `Path`            | Host-native path rooted at the project root (see above). |
+| `!path_posix`        | `PurePosixPath`   | Pure Posix path (legacy alias of `!pure_path_posix`).    |
+| `!path_win`          | `PureWindowsPath` | Pure Windows path (legacy alias of `!pure_path_win`).    |
+| `!pure_path`         | `PurePath`        | OS-default pure-flavor path.                             |
+| `!pure_path_posix`   | `PurePosixPath`   | Explicit Posix-flavor path regardless of host OS.        |
+| `!pure_path_win`     | `PureWindowsPath` | Explicit Windows-flavor path regardless of host OS.      |
+
+The "pure" variants exist so users on one OS can compose paths that target another OS (e.g. building a
+Posix path inside config that runs on a Windows host that talks to a remote Unix box). PyFlexCfg never
+auto-resolves a `!pure_path_*` to the local flavor — you asked for it, you get it.
+
+Examples:
+
+```yaml
+greeting: !string ['Hello, ', 'world!']
+log_file: !proj_root [logs, app.log]
+home_cache: !home_dir [.cache, my-app]
+remote_log: !pure_path_posix [/var, log, remote, app.log]
+windows_share: !pure_path_win ['C:\', Shares, app]
+```
+
+## Handling secrets
+
+Sensitive values must be encrypted before being committed.
+
+Encrypt:
+
+```python
+import os
+from pyflexcfg import AESCipher
+
+aes = AESCipher(os.environ['PYFLEX_CFG_KEY'])
+ciphertext = aes.encrypt('hunter2')
+print(ciphertext)  # 'A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI'
+```
+
+`encrypt()` returns a base64 ASCII **string** — paste it directly into YAML, no quoting needed:
+
+```yaml
+my_secret: !encr A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI
+```
+
+At load time PyFlexCfg decrypts the value into a `Secret`, whose `repr`/`str`/`format` outputs are all
+masked as `********`. Equality, slicing, and other `str` methods still work on the underlying value.
+
+PyFlexCfg requires `PYFLEX_CFG_KEY` only when at least one `!encr` value is loaded; if all your config
+is plain text, the variable is not needed.
+
+## Runtime reload
+
+`Cfg.reload_config(config_path=None, project_root=None, reset=True)` re-walks the configuration tree.
+
+- `config_path` — switch config roots (handy for tests). Defaults to the current `Cfg.config_root`.
+- `project_root` — explicit project root for the `!proj_root` constructor. When omitted, the value
+  is resolved from env vars per the rule above. Pass this to override without touching the
+  environment (the typical test pattern).
+- `reset=False` — overlay loaded top-level keys onto the existing configuration without dropping
+  siblings.
+
+## Logging
+
+PyFlexCfg writes DEBUG-level messages under the logger name `pyflexcfg`. To enable them:
+
 ```python
 import logging
 
-cfg_logger = logging.getLogger('pyflexcfg')
-
-```
-After that you can configure logging options, add logger handlers and so on the way you prefer.
-
-### Basic Usage
-
-Assuming the following configuration file structure:
-```
- \project               <-- working directory
-     ├─ config
-         ├─ general.yaml
-         ├─ env
-             ├─ dev.yaml
-             ├─ prd.yaml
-  ```
-And each YAML file contains a configuration option like this:
-```yaml
-data: test
-```
-You can load and use the configurations as follows:
-
-```python
-from pyflexcfg import Cfg
-
-print(Cfg.general.data)  # Access data from general.yaml
-print(Cfg.env.dev.data)  # Access data from env/dev.yaml
-print(Cfg.env.prd.data)  # Access data from env/prd.yaml
+logging.getLogger('pyflexcfg').setLevel(logging.DEBUG)
 ```
 
-**Note**: Directories, file names and value names in your configuration structure **must be compatible** with Python 
-attribute naming rules.
+Add your own handlers as needed.
 
-### Overriding values
+## Development
 
-You can override values in YAML files using environment variables. To do this, create environment variables that reflect
-the configuration values you want to override. This feature is particularly useful in environments like Docker Compose, 
-where you can pass environment-specific settings to containers dynamically, enabling seamless configuration management 
-across different deployment setups.
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
 
-For example, if you want to overwrite the value of
-```
-Cfg.env.dev.data
-```
-Define an environment variable:
-```
-CFG__ENV__DEV__DATA=some_value
-```
-Having that set, call the method 
-```python
-from pyflexcfg import Cfg
-
-Cfg.update_from_env()
-``` 
-The value from the environment variable will replace the corresponding value from the YAML file.
-
-
-### Handling secrets
-
-Any sensitive data present in configuration files should be kept as encrypted!
-
-**PyFlexCfg** allows you to encrypt your sensitive date with AES encryption prior to placing it in config files and 
-auto-decrypt it upon configuration loading if you have an encryption key set in environment variable. 
-
-#### Encrypting secrets
-
-Use the AESCipher class to encrypt your secrets before putting them in config files:
-```python
-from pyflexcfg import AESCipher
-
-aes = AESCipher('secret-key')
-aes.encrypt('some-secret-to-encrypt')
-```
-This will produce an output like:
-
-```python
-b'A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI'
-```
-Store the encrypted secret as bytes or string in a YAML file with the **!encr** prefix:
-
-```yaml
-my_secret: !encr b'A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI'  # as bytes
-```
-```yaml
-my_secret: !encr A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI  # as string
-```
-
-#### Decrypting secrets
-
-When **PyFlexCfg** loads the configuration and the environment variable **PYFLEX_CFG_KEY** is set with your encryption key, 
-it will automatically decrypt values marked with **!encr** prefix and store them in Cfg as a Secret strings, masking 
-them in logs and console outputs with ******. 
-
-Use the AESCipher class to manually decrypt your secrets if needed:
-```python
-from pyflexcfg import AESCipher
-
-aes = AESCipher('secret-key')
-aes.decrypt(b'A1u6BIE2xGtYTSoFRE83H0VHsAW3nrv4WB+T/FEAj1fsh8HIId9r/Rskl0bnDHTI')
-```
-
-### Additional constructors
-
-Several custom constructors are available for use in your configuration files to expand its functionality:
-
-#### String constructor
-   
-Implemented with the **!string** prefix and can be used for composing strings, URLs and so on.
-
-String construction example:
-
-Assume having a file ./config/data.yaml with content
-```yaml
-string_var: !string ['This', ' is', ' a', ' test', ' string']
-```
-```python
-from pyflexcfg import Cfg
-print(Cfg.data.string_var)
-
->> 'This is a test string'
-```
-
-URL construction example:
-
-Assume having a file ./config/data.yaml with content
-```yaml
-base_url: &base https://test.com
-slug: &slug /test/
-full_url: !string [*base, *slug, index.html]
-```
-```python
-from pyflexcfg import Cfg
-print(Cfg.data.full_url)
-
->> 'https://test.com/test/index.html'
-```
-
-#### Paths constructors
-
-There are two paths constructors presented by prefixes **!path_win** and **!path_posix**. 
-Their purpose is to compose and return **PureWindowsPath** and **PurePosixPath** pathlib instances.
-
-Assume having a file ./config/data.yaml with content
-```yaml
-path_win: !path_win ['C:\', Test, files, test_file.txt]
-path_posix: !path_posix [/var, log, test.log]
-```
-```python
-from pyflexcfg import Cfg
-
-print(Cfg.data.path_win)
->> PureWindowsPath('C:/Test/files/test_file.txt')
-
-print(Cfg.data.path_posix)
->> PurePosixPath('/var/log/test.log')
-```
-
-In addition, there is one more path constructor presented with **!home_dir** prefix. Its purpose to be used as a base 
-for paths originating from User's home directory (OS independent). It returns a **PurePath** pathlib instance.
-
-Assume having a file ./config/data.yaml with content and logged in as **user**
-```yaml
-path: !home_dir [app, logs]
-```
-
-For Unix OS:
-```python
-from pyflexcfg import Cfg
-
-print(Cfg.data.path)
->> PurePath('/home/user/app/log/')
-```
-
-For Windows OS:
-```python
-from pyflexcfg import Cfg
-
-print(Cfg.data.path)
->> PurePath('C:/Users/user/app/log/')
+```shell
+uv sync                                # install dependencies
+uv run pytest                          # run the test suite
+uv run pytest tests/test_handler.py    # run a single file
+uv run ruff check .                    # lint
+uv run ruff format .                   # format
+uv build                               # produce wheel + sdist in dist/
 ```
