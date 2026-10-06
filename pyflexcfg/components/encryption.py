@@ -14,9 +14,12 @@ from .abstractclasses import ICipher
 
 logger = logging.getLogger(__name__)
 
+
 class _V:
     FAST = b'\x01'
-    KDF  = b'\x02'
+    KDF = b'\x02'
+
+
 _GCM_NONCE_SIZE = 12
 _KDF_SALT_SIZE = 16
 _KDF_ITERATIONS = 480_000
