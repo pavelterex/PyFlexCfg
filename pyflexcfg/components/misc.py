@@ -41,6 +41,13 @@ class Secret(str):
         return self._MASK
 
 
+class Required:
+    """Sentinel stored by the !required YAML tag; validate_required() raises if any remain at startup."""
+
+    def __repr__(self) -> str:
+        return '<required>'
+
+
 def _unwrap(value: Any) -> Any:
     match value:
         case AttrDict():

@@ -1,0 +1,6 @@
+# CLI test config
+service:
+  name: cli-app
+  # This value is encrypted
+  secret: !encr AaYCtE54eHB71gVjFhUTSt+tsNjurjJszBsaNLeEOv+SWpdTjfJ6YC33B5ODWPs=
+  debug: false

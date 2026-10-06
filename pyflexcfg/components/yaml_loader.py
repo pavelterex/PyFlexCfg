@@ -6,7 +6,7 @@ from yaml import Loader, ScalarNode, SequenceNode
 from .abstractclasses import ICipher
 from .constants import ENCRYPTION_KEY_ENV_VAR, PROJECT_ROOT_PATH_ENV, ROOT_CONFIG_PATH_ENV
 from .encryption import AESCipher
-from .misc import Secret
+from .misc import AttrDict, Required, Secret
 
 
 class YamlLoader(Loader):
@@ -56,11 +56,22 @@ class YamlLoader(Loader):
         def pure_path_win(loader: Loader, node: SequenceNode) -> PureWindowsPath:
             return PureWindowsPath(*loader.construct_sequence(node))
 
+        def required(_loader: Loader, _node: ScalarNode) -> Required:
+            return Required()
+
         def string(loader: Loader, node: SequenceNode) -> str:
             return ''.join(str(i) for i in loader.construct_sequence(node))
 
+        def vault(loader: Loader, node: ScalarNode) -> Secret | AttrDict:
+            from .providers import get_vault_provider
+
+            result = get_vault_provider().fetch(loader.construct_scalar(node))
+            return result if isinstance(result, AttrDict) else Secret(result)
+
         self.add_constructor('!encr', encrypted)
+        self.add_constructor('!encr_kdf', encrypted)
         self.add_constructor('!home_dir', home_dir)
+        self.add_constructor('!required', required)
         self.add_constructor('!path', path)
         self.add_constructor('!path_posix', path_posix)
         self.add_constructor('!path_win', path_win)
@@ -69,6 +80,7 @@ class YamlLoader(Loader):
         self.add_constructor('!pure_path_posix', pure_path_posix)
         self.add_constructor('!pure_path_win', pure_path_win)
         self.add_constructor('!string', string)
+        self.add_constructor('!vault', vault)
 
     @property
     def cipher(self) -> ICipher:

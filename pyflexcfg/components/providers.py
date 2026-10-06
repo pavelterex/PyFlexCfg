@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import os
+from abc import ABC, abstractmethod
+from typing import Any
+
+from .misc import AttrDict
+
+
+class SecretProvider(ABC):
+    @abstractmethod
+    def fetch(self, path: str) -> Any: ...
+
+
+class VaultProvider(SecretProvider):
+    def __init__(self) -> None:
+        if not (addr := os.getenv('VAULT_ADDR')):
+            raise RuntimeError('VAULT_ADDR env var is required for the !vault tag')
+
+        if not (token := os.getenv('VAULT_TOKEN')):
+            raise RuntimeError('VAULT_TOKEN env var is required for the !vault tag')
+
+        try:
+            import hvac
+        except ImportError:
+            raise RuntimeError('hvac is required for the !vault tag. Install it with: pip install "pyflexcfg[vault]"')
+
+        self._client = hvac.Client(url=addr, token=token)
+
+    def fetch(self, path: str) -> Any:
+        """
+        Fetch a secret from Vault.
+
+        Path format: ``mount/path/to/secret#field``. The ``#field`` suffix
+        selects one key from the secret's data dict; omit it to get the full
+        dict returned as an :class:`AttrDict`.  KV v2 is detected when the
+        path contains ``/data/``; otherwise KV v1 is assumed.
+        """
+        secret_path, _, field = path.partition('#')
+
+        try:
+            if '/data/' in secret_path:
+                mount, _, kv_path = secret_path.partition('/')
+                kv_path = kv_path.partition('/')[2]  # strip leading 'data/'
+                response = self._client.secrets.kv.v2.read_secret_version(
+                    path=kv_path,
+                    mount_point=mount,
+                )
+                data: dict[str, Any] = response['data']['data']
+            else:
+                response = self._client.secrets.kv.v1.read_secret(path=secret_path)
+                data = response['data']
+        except Exception as exc:
+            raise RuntimeError(f'Failed to fetch Vault secret at {secret_path!r}: {exc}') from exc
+
+        if field:
+            if field not in data:
+                raise RuntimeError(f'Field {field!r} not found in Vault secret at {secret_path!r}')
+            return data[field]
+
+        return _to_attrdict(data)
+
+
+_vault_provider: VaultProvider | None = None
+
+
+def get_vault_provider() -> VaultProvider:
+    global _vault_provider
+    if _vault_provider is None:
+        _vault_provider = VaultProvider()
+    return _vault_provider
+
+
+def _to_attrdict(data: Any) -> Any:
+    if isinstance(data, dict):
+        return AttrDict({k: _to_attrdict(v) for k, v in data.items()})
+
+    if isinstance(data, list):
+        return [_to_attrdict(i) for i in data]
+
+    return data

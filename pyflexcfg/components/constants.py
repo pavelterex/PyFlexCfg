@@ -1,4 +1,7 @@
-# Env var holding the AES key used by the !encr YAML constructor.
+# Env var that selects the active environment layer merged into root after YAML load.
+ACTIVE_ENV_VAR = 'PYFLEX_ENV'
+
+# Env var holding the AES key used by the !encr / !encr_kdf YAML constructors.
 ENCRYPTION_KEY_ENV_VAR = 'PYFLEX_CFG_KEY'
 
 # Valid identifier regex for loaded directory/file/attribute names. Items whose name

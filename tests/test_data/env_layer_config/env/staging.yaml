@@ -1,0 +1,5 @@
+service:
+  name: myapp-staging
+
+database:
+  host: staging-host

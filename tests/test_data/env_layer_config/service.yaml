@@ -1,0 +1,3 @@
+name: myapp
+debug: false
+timeout: 30

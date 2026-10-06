@@ -1,0 +1,3 @@
+host: base-host
+port: 5432
+name: mydb

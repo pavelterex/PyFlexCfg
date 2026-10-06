@@ -1,6 +1,6 @@
 [project]
 name = "pyflexcfg"
-version = "2.0.0"
+version = "3.0.0"
 description = "Flexible configuration handler for Python projects."
 authors = [{ name = "Pavel T", email = "pavelterex@gmail.com" }]
 license = { text = "MIT" }
@@ -15,6 +15,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "cryptography>=43.0.3",
@@ -22,11 +24,18 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
+[project.optional-dependencies]
+vault = ["hvac>=2.0.0"]
+
+[project.scripts]
+pyflexcfg = "pyflexcfg.__main__:main"
+
 [project.urls]
 Repository = "https://github.com/pavelterex/PyFlexCfg"
 
 [dependency-groups]
 dev = [
+    "hvac>=2.0.0",
     "pytest>=8.3.3",
     "pytest-assume>=2.4.3",
     "ruff>=0.6.0",
@@ -75,13 +84,26 @@ ignore = [
     "PLW2901",  # redefined-loop-name
     "PT013",    # pytest-incorrect-pytest-import — we use `from pytest import param`
     "RET503",   # implicit-return
+    "W505",     # doc-line-too-long — enforced by line-length setting instead
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = [
+    "ARG001",   # pytest fixtures referenced by name, not always used directly in body
     "ARG002",   # pytest fixture-name parameters
     "B011",     # allow asserts with messages
     "PLR2004",  # magic value comparisons are the point of a test
+    "PLC0415",  # deferred imports inside test helpers are intentional
+]
+"pyflexcfg/__main__.py" = [
+    "PLC0415",  # deferred imports are intentional: avoids triggering __init__.py metaclass
+]
+"pyflexcfg/components/providers.py" = [
+    "PLC0415",  # `import hvac` is deferred to avoid a hard dependency on the optional package
+    "PLW0603",  # module-level singleton managed via global statement by design
+]
+"pyflexcfg/components/yaml_loader.py" = [
+    "PLC0415",  # vault provider import is deferred to avoid a circular import at module level
 ]
 
 [tool.ruff.lint.flake8-pytest-style]

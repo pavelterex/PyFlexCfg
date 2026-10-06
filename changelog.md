@@ -4,6 +4,55 @@ All notable changes to PyFlexCfg are documented here. Newest entries on top.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-10-06
+
+### Breaking
+
+- **`!encr` ciphertext format changed (AES-CBC → AES-GCM).** New encryptions use AES-GCM. Existing
+  CBC ciphertexts are **decrypted transparently** but emit a `logging.WARNING` on every load; run
+  `pyflexcfg encrypt` to migrate all values to AES-GCM and silence the warning.
+
+### Added
+
+- **`!encr_kdf` YAML tag** — AES-GCM encryption with PBKDF2HMAC (SHA-256, 480k iterations, random
+  salt) for crown-jewel secrets. `AESCipher.encrypt_kdf(plaintext)` produces the ciphertext.
+  `AESCipher.decrypt()` is self-routing: it reads the version byte (`\x01` for fast, `\x02` for
+  KDF) so both tags share the same decrypt path.
+- **`PYFLEX_ENV` environment layering.** Set `PYFLEX_ENV=dev` to deep-merge `Cfg.env.dev` into the
+  root `Cfg` namespace after YAML loading. Layering order (lowest → highest): base YAML →
+  env-layer merge → `CFG__*` env-var overrides → `validate_required()`.
+  `Cfg.apply_env_layer()` can be called explicitly; it is also called automatically inside
+  `reload_config()`.
+- **`!required` YAML tag + `Cfg.validate_required()`.** Mark any scalar value `!required` to
+  declare it must be supplied at runtime. If any `!required` sentinels survive all override layers,
+  `validate_required()` raises `RuntimeError` listing every missing dotted path.
+- **CLI — `python -m pyflexcfg` (or `pyflexcfg` after install).**
+  - `pyflexcfg show` — print the effective merged config as YAML (secrets masked).
+  - `pyflexcfg env` — print config root, project root, and active `PYFLEX_ENV`.
+  - `pyflexcfg encrypt [--dry-run]` — walk all YAML files and encrypt any plaintext `!encr` /
+    `!encr_kdf` values in-place. `--dry-run` reports without writing and exits 1 if any are found
+    (drop-in pre-commit hook).
+- **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
+  (`hvac` dependency). Path format: `mount/path#field` — the `#field` suffix selects a key from
+  the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
+  when the path contains `/data/`; otherwise KV v1 is assumed. The `VaultProvider` singleton is
+  initialised on the first `!vault` tag hit.
+- **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
+  `len(PYFLEX_CFG_KEY) < 32`.
+- **`Required` class exported from the package root** (`from pyflexcfg import Required`). Useful
+  for programmatic sentinel injection and test assertions.
+
+### Security
+
+- **AES-CBC replaced with AES-GCM.** GCM provides authenticated encryption — any ciphertext
+  tampering raises `ValueError` at decrypt time rather than silently producing corrupted plaintext.
+  The old CBC implementation had no authentication tag.
+- **Debug log no longer leaks env-var values on unknown `::Type` suffix.** When `update_from_env()`
+  encounters an unrecognised type suffix (e.g. `CFG__X=secret::nosuchtype`), the log message now
+  records only the type name, never the value that preceded `::` — which could have been a secret.
+
+---
+
 ## [2.0.0] — 2026-05-25
 
 ### Breaking
@@ -99,5 +148,6 @@ Pre-changelog era. See `git log` for granular history. Notable features in 1.0.0
 - `NAME_REGEX_STRING` validation for loaded names.
 - Centralized `logger` at `pyflexcfg.components.logger`.
 
+[3.0.0]: https://github.com/pavelterex/PyFlexCfg/releases/tag/v3.0.0
 [2.0.0]: https://github.com/pavelterex/PyFlexCfg/releases/tag/v2.0.0
 [1.0.0]: https://github.com/pavelterex/PyFlexCfg/releases/tag/v1.0.0

@@ -6,14 +6,32 @@ from typing import Any
 import yaml
 
 from .components import logger
+from .components.constants import ACTIVE_ENV_VAR
 from .components.metaclasses import HandlerMeta
-from .components.misc import AttrDict, Secret
+from .components.misc import AttrDict, Required, Secret
 from .components.yaml_loader import YamlLoader
 
 # Suffixes that opt into dict-merge behavior when both env value and existing
 # config value are dicts. Every other suffix (and auto-coercion) replaces the
 # existing value outright.
 _MERGE_SUFFIXES = {'yaml_m'}
+
+
+def _collect_required(value: Any, path: str, missing: list[str]) -> None:
+    if isinstance(value, Required):
+        missing.append(path)
+    elif isinstance(value, AttrDict):
+        for k, v in value.items():
+            _collect_required(v, f'{path}.{k}', missing)
+
+
+def _deep_merge(target: AttrDict, source: AttrDict) -> None:
+    for key, value in source.items():
+        existing = target.get(key)
+        if isinstance(existing, AttrDict) and isinstance(value, AttrDict):
+            _deep_merge(existing, value)
+        else:
+            target[key] = value
 
 
 def _parse_yaml(value: str) -> Any:
@@ -46,6 +64,30 @@ _TYPE_CASTERS: dict[str, Callable[[str], Any]] = {
 
 class ConfigHandler(AttrDict, metaclass=HandlerMeta):
     """Public configuration handler; YAML data is loaded via :class:`HandlerMeta`."""
+
+    @classmethod
+    def apply_env_layer(cls) -> None:
+        """
+        Deep-merge the environment-specific config namespace into the root.
+
+        Reads ``PYFLEX_ENV``, looks up ``Cfg.env.{name}``, and merges its
+        keys into the root namespace.  Runs before :meth:`update_from_env` so
+        ``CFG__*`` overrides always take priority over the env layer.
+        No-ops silently when ``PYFLEX_ENV`` is unset or the named layer is not found.
+        """
+        env_name = os.getenv(ACTIVE_ENV_VAR, '').lower()
+        if not env_name:
+            return
+        env_obj = getattr(getattr(cls, 'env', None), env_name, None)
+        if not isinstance(env_obj, AttrDict):
+            logger.debug('PYFLEX_ENV=%r: no config found at Cfg.env.%s', env_name, env_name)
+            return
+        for key, value in env_obj.items():
+            existing = getattr(cls, key, None)
+            if isinstance(existing, AttrDict) and isinstance(value, AttrDict):
+                _deep_merge(existing, value)
+            else:
+                setattr(cls, key, value)
 
     @classmethod
     def reload_config(
@@ -93,6 +135,10 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         for key, value in loaded.items():
             setattr(cls, key, value)
 
+        cls.apply_env_layer()
+        cls.update_from_env()
+        cls.validate_required()
+
     @classmethod
     def update_from_env(cls) -> None:
         """
@@ -138,6 +184,26 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                 except (AttributeError, TypeError) as exc:
                     logger.debug('Skipping override %s: cannot assign on %r (%s)', var_name, container, exc)
 
+    @classmethod
+    def validate_required(cls) -> None:
+        """
+        Raise if any ``!required``-tagged config values were not supplied.
+
+        Called after :meth:`apply_env_layer` and :meth:`update_from_env` so all
+        override layers have had a chance to satisfy required keys.
+
+        Raises:
+            RuntimeError: Lists every dotted path that still holds a
+                :class:`Required` sentinel.
+        """
+        missing: list[str] = []
+        for key, value in cls.__dict__.items():
+            if key.startswith('_') or callable(getattr(cls, key, None)):
+                continue
+            _collect_required(value, key, missing)
+        if missing:
+            raise RuntimeError(f'Required config values are missing: {missing}')
+
     @staticmethod
     def _convert_value_type(src_value: str) -> tuple[Any, bool]:
         """
@@ -169,7 +235,7 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                 except (ValueError, yaml.YAMLError) as exc:
                     raise RuntimeError(f'Value {value!r} could not be cast as {value_type!r}: {exc}') from exc
 
-            logger.debug('Unknown type %r in %r; falling back to auto-conversion', value_type, src_value)
+            logger.debug('Unknown type suffix %r; falling back to auto-conversion', value_type)
             src_value = value
 
         for caster in (int, float, _to_bool):
