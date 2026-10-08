@@ -34,13 +34,14 @@ class VaultProvider(SecretProvider):
         Path format: ``mount/path/to/secret#field``. The ``#field`` suffix
         selects one key from the secret's data dict; omit it to get the full
         dict returned as an :class:`AttrDict`.  KV v2 is detected when the
-        path contains ``/data/``; otherwise KV v1 is assumed.
+        path contains ``/data/``; otherwise KV v1 is assumed. The first path
+        segment is the mount point in both cases.
         """
         secret_path, _, field = path.partition('#')
+        mount, _, kv_path = secret_path.partition('/')
 
         try:
             if '/data/' in secret_path:
-                mount, _, kv_path = secret_path.partition('/')
                 kv_path = kv_path.partition('/')[2]  # strip leading 'data/'
                 response = self._client.secrets.kv.v2.read_secret_version(
                     path=kv_path,
@@ -48,7 +49,7 @@ class VaultProvider(SecretProvider):
                 )
                 data: dict[str, Any] = response['data']['data']
             else:
-                response = self._client.secrets.kv.v1.read_secret(path=secret_path)
+                response = self._client.secrets.kv.v1.read_secret(path=kv_path, mount_point=mount)
                 data = response['data']
         except Exception as exc:
             raise RuntimeError(f'Failed to fetch Vault secret at {secret_path!r}: {exc}') from exc

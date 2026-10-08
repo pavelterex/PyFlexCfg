@@ -73,10 +73,23 @@ def vault_server():
     # Dev mode mounts KV v2 at secret/
     _seed(container_id, 'secret/myapp/db', password='hunter2', user='admin')
     _seed(container_id, 'secret/myapp/api', key='abc123')
+    _vault(container_id, 'secrets', 'enable', '-path=kv1', '-version=1', 'kv')
+    _seed(container_id, 'kv1/myapp/legacy', token='v1-token')
 
     yield container_id
 
     subprocess.run(['docker', 'stop', container_id], capture_output=True, check=False)
+
+
+def test_kv1_fetch_field(vault_env):
+    provider = VaultProvider()
+    assert provider.fetch('kv1/myapp/legacy#token') == 'v1-token', 'KV v1 field must be read from its own mount'
+
+
+def test_kv1_tag_whole_secret(vault_env):
+    data = yaml.load('legacy: !vault kv1/myapp/legacy\n', YamlLoader)
+    assert isinstance(data['legacy'], AttrDict), f'got {type(data["legacy"]).__name__}'
+    assert data['legacy'].token == 'v1-token', 'KV v1 whole secret must resolve through the !vault tag'
 
 
 def test_kv2_fetch_field(vault_env):
@@ -130,14 +143,24 @@ def test_vault_tag_whole_secret(vault_env):
     data = yaml.load('db: !vault secret/data/myapp/db\n', YamlLoader)
     assert isinstance(data['db'], AttrDict)
     assert data['db'].password == 'hunter2'
+    assert isinstance(data['db'].password, Secret), 'whole-secret leaves must be masked'
+    assert 'hunter2' not in repr(data['db']), 'whole-secret value leaked into repr'
 
 
 def _docker_available() -> bool:
-    return subprocess.run(['docker', 'info'], capture_output=True, check=False).returncode == 0
+    try:
+        return subprocess.run(['docker', 'info'], capture_output=True, check=False).returncode == 0
+    except OSError:
+        return False
 
 
 def _seed(container_id: str, path: str, **fields: str) -> None:
     """Write KV fields via the vault CLI inside the container."""
+    _vault(container_id, 'kv', 'put', path, *[f'{k}={v}' for k, v in fields.items()])
+
+
+def _vault(container_id: str, *args: str) -> None:
+    """Run a vault CLI command inside the container."""
     subprocess.run(
         [
             'docker',
@@ -148,10 +171,7 @@ def _seed(container_id: str, path: str, **fields: str) -> None:
             f'VAULT_ADDR={_VAULT_ADDR}',
             container_id,
             'vault',
-            'kv',
-            'put',
-            path,
-            *[f'{k}={v}' for k, v in fields.items()],
+            *args,
         ],
         capture_output=True,
         check=True,

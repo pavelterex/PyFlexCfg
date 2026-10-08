@@ -5,14 +5,16 @@ import sys
 from pathlib import Path
 
 import yaml
+from conftest import TEST_CBC_CIPHERTEXT, TEST_ENCRYPTED_STRING, TEST_KEY, TEST_STRING
+
+from pyflexcfg.components.encryption import AESCipher
 
 _CLI_CONFIG = Path(__file__).parent / 'test_data' / 'cli_config'
 _PYTHON = sys.executable
 
 
 def test_encrypt_dry_run_all_clean(tmp_path):
-    encrypted = 'AaYCtE54eHB71gVjFhUTSt+tsNjurjJszBsaNLeEOv+SWpdTjfJ6YC33B5ODWPs='
-    (tmp_path / 'app.yaml').write_text(f'service:\n  secret: !encr {encrypted}\n', encoding='utf-8')
+    (tmp_path / 'app.yaml').write_text(f'service:\n  secret: !encr {TEST_ENCRYPTED_STRING}\n', encoding='utf-8')
     result = _run('encrypt', '--dry-run', config_root=tmp_path)
     assert result.returncode == 0
     assert 'encrypted' in result.stdout.lower()
@@ -23,6 +25,56 @@ def test_encrypt_dry_run_finds_plaintext(tmp_path):
     result = _run('encrypt', '--dry-run', config_root=tmp_path)
     assert result.returncode == 1
     assert 'plaintext' in result.stderr.lower() or 'plaintext' in result.stdout.lower()
+
+
+def test_encrypt_dry_run_reports_legacy_without_writing(tmp_path):
+    original = f'secret: !encr {TEST_CBC_CIPHERTEXT}\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', '--dry-run', config_root=tmp_path)
+
+    assert result.returncode == 0, f'legacy ciphertext is not plaintext, got rc {result.returncode}'
+    assert 'legacy' in result.stdout.lower(), f'legacy value must be reported, got {result.stdout!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'dry run must not write'
+
+
+def test_encrypt_dry_run_unsupported_scalar_exits_nonzero(tmp_path):
+    original = 'secret: !encr "two words"\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', '--dry-run', config_root=tmp_path)
+
+    assert result.returncode == 1, 'a quoted value may be plaintext, so the check must fail'
+    assert 'unsupported scalar form' in result.stderr, f'got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must stay untouched'
+
+
+def test_encrypt_legacy_wrong_key_left_untouched(tmp_path):
+    original = f'secret: !encr {TEST_CBC_CIPHERTEXT}\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path, cfg_key='not-the-key')
+
+    assert result.returncode == 1, 'an undecryptable legacy value must fail the run'
+    assert 'does not decrypt' in result.stderr, f'got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'value must not be double-encrypted'
+
+
+def test_encrypt_migrates_legacy_ciphertext(tmp_path):
+    (tmp_path / 'app.yaml').write_text(f'secret: !encr {TEST_CBC_CIPHERTEXT}\n', encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path)
+    migrated = (tmp_path / 'app.yaml').read_text(encoding='utf-8').split('!encr ')[1].strip()
+
+    assert result.returncode == 0, f'migration failed: {result.stderr!r}'
+    assert AESCipher.is_encrypted(migrated), 'migrated value must be in the current format'
+    assert AESCipher(TEST_KEY).decrypt(migrated) == TEST_STRING, 'migrated value must hold the original secret'
+
+
+def test_encrypt_output_omits_values(tmp_path):
+    content = f'plain: !encr myplainvalue\nlegacy: !encr {TEST_CBC_CIPHERTEXT}\nquoted: !encr "two words"\n'
+    (tmp_path / 'app.yaml').write_text(content, encoding='utf-8')
+    result = _run('encrypt', '--dry-run', config_root=tmp_path)
+    output = result.stdout + result.stderr
+
+    for leaked in ('myplainvalue', TEST_STRING, 'two'):
+        assert leaked not in output, f'{leaked!r} leaked into CLI output'
 
 
 def test_encrypt_preserves_comments(tmp_path):
@@ -53,8 +105,7 @@ def test_encrypt_rewrites_plaintext_value(tmp_path):
 
 
 def test_encrypt_skips_already_encrypted(tmp_path):
-    encrypted = 'AaYCtE54eHB71gVjFhUTSt+tsNjurjJszBsaNLeEOv+SWpdTjfJ6YC33B5ODWPs='
-    original = f'service:\n  secret: !encr {encrypted}\n'
+    original = f'service:\n  secret: !encr {TEST_ENCRYPTED_STRING}\n'
     (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
     _run('encrypt', config_root=tmp_path)
     # File should be unchanged (no rewrite triggered)
@@ -100,7 +151,7 @@ def test_show_prints_config_yaml():
     assert 'app' in parsed
 
 
-def _run(*args, config_root=_CLI_CONFIG, extra_env=None, cfg_key='1234'):
+def _run(*args, config_root=_CLI_CONFIG, extra_env=None, cfg_key=TEST_KEY):
     """Run `python -m pyflexcfg <args>` with a controlled environment."""
     import os
 

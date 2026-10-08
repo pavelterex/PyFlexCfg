@@ -9,7 +9,7 @@ from pathlib import Path
 TEST_KEY = '1234'
 TEST_STRING = 'some-secret-string'
 # AES-GCM ciphertext (v3+) — produced by AESCipher(TEST_KEY).encrypt(TEST_STRING)
-TEST_ENCRYPTED_STRING = 'AaYCtE54eHB71gVjFhUTSt+tsNjurjJszBsaNLeEOv+SWpdTjfJ6YC33B5ODWPs='
+TEST_ENCRYPTED_STRING = 'UEZMWAHPhy7m1lZyxV1HCHN2dNROWwriY67DKnTE3rTKJtwVr0RW7y0lhjJ8nRU4KAoK'
 TEST_ENCRYPTED_BYTES = TEST_ENCRYPTED_STRING.encode('ascii')
 # Original AES-CBC ciphertext kept for legacy-detection tests only
 TEST_CBC_CIPHERTEXT = 'u8euuCiFlgzpI2aY6/vYtJbQ4ApNbqtnwTjYVJ/APs2aRVD8XbC6tiEsmrcKjqXd'

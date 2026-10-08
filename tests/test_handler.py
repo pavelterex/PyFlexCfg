@@ -125,7 +125,7 @@ class TestTmpPath:
     """
     End-to-end scenarios that build a fresh config tree per test.
 
-    The autouse `_restore_cfg_after_test` fixture in `conftest.py` puts
+    The autouse `restore_cfg_after_test` fixture in `conftest.py` puts
     `Cfg` back on the main test config after each test runs.
     """
 

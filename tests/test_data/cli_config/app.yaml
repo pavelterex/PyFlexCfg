@@ -2,5 +2,5 @@
 service:
   name: cli-app
   # This value is encrypted
-  secret: !encr AaYCtE54eHB71gVjFhUTSt+tsNjurjJszBsaNLeEOv+SWpdTjfJ6YC33B5ODWPs=
+  secret: !encr UEZMWAHPhy7m1lZyxV1HCHN2dNROWwriY67DKnTE3rTKJtwVr0RW7y0lhjJ8nRU4KAoK
   debug: false

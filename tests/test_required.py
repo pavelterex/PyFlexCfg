@@ -9,6 +9,7 @@ from pyflexcfg.components.misc import Required
 
 _BASE_CONFIG = Path(__file__).parent / 'test_data' / 'test_config'
 _REQUIRED_CONFIG = Path(__file__).parent / 'test_data' / 'required_config'
+_SEQUENCE_YAML = 'hosts:\n  - host-a\n  - !required\nservers:\n  - name: primary\n    host: !required\n'
 
 
 def test_required_error_names_dotted_path(monkeypatch):
@@ -16,6 +17,18 @@ def test_required_error_names_dotted_path(monkeypatch):
         _load_required(monkeypatch)
     msg = str(exc_info.value)
     assert 'server.host' in msg or 'database.host' in msg
+
+
+def test_required_in_sequence_reported_with_index(tmp_path):
+    (tmp_path / 'app.yaml').write_text(_SEQUENCE_YAML, encoding='utf-8')
+
+    with pytest.raises(RuntimeError) as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+    msg = str(exc_info.value)
+
+    assert 'app.hosts[1]' in msg, f'sentinel inside a list must be reported with its index, got {msg!r}'
+    assert 'app.servers[0].host' in msg, f'sentinel in a dict inside a list must be reported, got {msg!r}'
+    assert 'app.hosts[0]' not in msg, f'a real list item must not be reported, got {msg!r}'
 
 
 def test_required_multiple_missing_all_reported(monkeypatch):
@@ -58,6 +71,16 @@ def test_required_satisfied_by_env_layer(monkeypatch, tmp_path):
     monkeypatch.setenv('PYFLEX_ENV', 'dev')
     Cfg.reload_config(config_path=cfg_root)
     assert Cfg.server.host == 'dev-host'
+
+
+def test_required_sequence_satisfied_by_replacing_the_list(monkeypatch, tmp_path):
+    (tmp_path / 'app.yaml').write_text(_SEQUENCE_YAML, encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__HOSTS', '[host-a, host-b]::yaml_r')
+    monkeypatch.setenv('CFG__APP__SERVERS', '[{name: primary, host: db-1}]::yaml_r')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.hosts == ['host-a', 'host-b'], f'got {Cfg.app.hosts!r}'
 
 
 def test_required_sibling_real_values_unchanged(monkeypatch):

@@ -1,22 +1,32 @@
-import sys as _sys
+import threading
+from typing import TYPE_CHECKING, Any
 
 from .components.encryption import AESCipher
 from .components.misc import AttrDict, Required, Secret
 
-# Skip config loading when running the encrypt CLI command — it operates on raw
-# YAML text and must work even when files contain plaintext !encr values.
-_cli_encrypt = (
-    getattr(_sys, 'argv', None) is not None
-    and len(_sys.argv) >= 2  # noqa: PLR2004
-    and _sys.argv[1] == 'encrypt'
-)
-
-if not _cli_encrypt:
+if TYPE_CHECKING:
     from .config_handler import ConfigHandler as Cfg
 
-    __all__ = ['AESCipher', 'AttrDict', 'Cfg', 'Required', 'Secret']
-    Cfg.apply_env_layer()
-    Cfg.update_from_env()
-    Cfg.validate_required()
-else:
-    __all__ = ['AESCipher', 'AttrDict', 'Required', 'Secret']
+__all__ = ['AESCipher', 'AttrDict', 'Cfg', 'Required', 'Secret']
+
+_load_lock = threading.RLock()
+
+
+def __getattr__(name: str) -> Any:
+    """Load the configuration the first time `Cfg` is requested from the package."""
+    if name != 'Cfg':
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+
+    with _load_lock:
+        # Another thread may have finished loading while this one waited for the lock.
+        if (loaded := globals().get('Cfg')) is not None:
+            return loaded
+
+        from .config_handler import ConfigHandler  # noqa: PLC0415
+
+        ConfigHandler.apply_env_layer()
+        ConfigHandler.update_from_env()
+        ConfigHandler.validate_required()
+        globals()['Cfg'] = ConfigHandler
+
+        return ConfigHandler

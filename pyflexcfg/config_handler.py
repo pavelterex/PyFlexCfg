@@ -18,11 +18,15 @@ _MERGE_SUFFIXES = {'yaml_m'}
 
 
 def _collect_required(value: Any, path: str, missing: list[str]) -> None:
-    if isinstance(value, Required):
-        missing.append(path)
-    elif isinstance(value, AttrDict):
-        for k, v in value.items():
-            _collect_required(v, f'{path}.{k}', missing)
+    match value:
+        case Required():
+            missing.append(path)
+        case dict():
+            for key, item in value.items():
+                _collect_required(item, f'{path}.{key}', missing)
+        case list() | tuple():
+            for index, item in enumerate(value):
+                _collect_required(item, f'{path}[{index}]', missing)
 
 
 def _deep_merge(target: AttrDict, source: AttrDict) -> None:

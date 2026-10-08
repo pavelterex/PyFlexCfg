@@ -91,6 +91,16 @@ PYFLEX_ENV=dev python app.py
 Directory and file names must be lowercase identifiers matching `^[a-z][a-z0-9_]{0,28}[a-z0-9]$`.
 Names that don't match are silently skipped during loading.
 
+**When loading happens.** The configuration is loaded the first time `Cfg` is requested from the
+package — in practice, at your `from pyflexcfg import Cfg` line. That is also where a missing config
+root or an unsatisfied `!required` key raises. A bare `import pyflexcfg`, or importing only
+`AESCipher`, `AttrDict`, `Required` or `Secret`, loads nothing and needs no config directory.
+
+That first load is thread-safe: if several threads request `Cfg` at the same moment, the config is
+loaded once and every thread receives the same fully loaded object. Later calls to
+`Cfg.reload_config()` and any changes you make to `Cfg` at runtime are not synchronised — guard
+those yourself if threads share them.
+
 ---
 
 ## Configuration root and project root
@@ -123,7 +133,7 @@ Any `*.env` file found directly inside the config root (non-recursive) is loaded
 ## Environment-variable overrides
 
 Variables matching `CFG__SECTION__KEY` override `Cfg.section.key`. `Cfg.update_from_env()` is called
-automatically at import, but you can call it again at any point (for example, after mutating env vars
+automatically when `Cfg` loads, but you can call it again at any point (for example, after mutating env vars
 in a test). Values are auto-coerced as `int` → `float` → `bool` → `str`. Force a specific type with
 a trailing `::Type` suffix:
 
@@ -171,7 +181,7 @@ config/
 PYFLEX_ENV=dev python app.py
 ```
 
-After import: `Cfg.database.host == 'dev-db'`, `Cfg.database.port == 5432` (preserved by deep merge).
+After `Cfg` loads: `Cfg.database.host == 'dev-db'`, `Cfg.database.port == 5432` (preserved by deep merge).
 
 Priority order (lowest → highest): base YAML → env-layer merge → `CFG__*` env-var overrides.
 
@@ -191,16 +201,25 @@ port: 5432
 password: !required
 ```
 
-PyFlexCfg raises `RuntimeError` at startup (after all overrides run) if any sentinels remain:
+PyFlexCfg raises `RuntimeError` when `Cfg` loads (after all overrides run) if any sentinels remain:
 
 ```
 RuntimeError: Required config values are missing: ['database.host', 'database.password']
 ```
 
-Satisfy required keys with env-var overrides or the env layer before import:
+Satisfy required keys with env-var overrides or the env layer before `Cfg` is first imported:
 
 ```shell
 CFG__DATABASE__HOST=localhost CFG__DATABASE__PASSWORD=hunter2 python app.py
+```
+
+`!required` also works inside lists, including on keys of mappings within a list. Such entries are
+reported with their index, for example `app.hosts[1]` or `app.servers[0].host`. A list item cannot
+be overridden on its own — env-var overrides and the env layer replace a list as a whole — so supply
+the complete list:
+
+```shell
+CFG__APP__HOSTS='[host-a, host-b]::yaml_r' python app.py
 ```
 
 The `Required` sentinel class is importable if you need to inspect or inject it programmatically:
@@ -221,7 +240,7 @@ Cfg.validate_required()  # raises if any Required() sentinels remain
 | `!encr` | `Secret` | Decrypt a base64 secret using `PYFLEX_CFG_KEY` (AES-GCM v1). |
 | `!encr_kdf` | `Secret` | Same but PBKDF2 KDF — slower, higher brute-force resistance. |
 | `!required` | `Required` | Raises at startup unless replaced by an override. |
-| `!vault` | `Secret` | Fetch from HashiCorp Vault (see [Vault section](#hashicorp-vault)). |
+| `!vault` | `Secret` / `AttrDict` of `Secret`s | Fetch from HashiCorp Vault (see [Vault section](#hashicorp-vault)). |
 | `!path` | `Path` | Host-native concrete path from the given parts. |
 | `!home_dir` | `Path` | Host-native path rooted at the current user's home directory. |
 | `!proj_root` | `Path` | Host-native path rooted at the project root (see above). |
@@ -277,9 +296,13 @@ PYFLEX_CFG_KEY=my-key pyflexcfg encrypt
 **Use in YAML:**
 
 ```yaml
-api_key: !encr AQ...
-db_pass: !encr_kdf Ag...
+api_key: !encr UEZMWA...
+db_pass: !encr_kdf UEZMWA...
 ```
+
+Every ciphertext starts with the 4-byte marker `PFLX` followed by a version byte, so in base64 it
+always begins with `UEZMWA`. The marker is how PyFlexCfg tells its own ciphertexts apart from v2
+ones and from plaintext; `AESCipher.is_encrypted(value)` performs the same check.
 
 At load time each value decrypts into a `Secret`. `Secret` is a `str` subclass — its `repr`,
 `str()`, f-strings, and `%`-format arguments all output `********`. Equality and slicing work
@@ -296,9 +319,9 @@ A key shorter than 32 characters emits a `WARNING`.
 
 ### Migrating `!encr` from v2
 
-v2 used AES-CBC; v3 switched to AES-GCM. **Old ciphertexts still decrypt** — PyFlexCfg detects
-the legacy format automatically and decrypts it transparently. However, every load of a legacy
-ciphertext emits a `logging.WARNING` urging migration.
+v2 used AES-CBC; v3 switched to AES-GCM. **Old ciphertexts still decrypt** — a value without the
+`PFLX` marker is treated as a v2 ciphertext and decrypted transparently. However, every load of a
+legacy ciphertext emits a `logging.WARNING` urging migration.
 
 To migrate all values in one step:
 
@@ -306,16 +329,23 @@ To migrate all values in one step:
 PYFLEX_CFG_KEY=my-key pyflexcfg encrypt
 ```
 
-This rewrites every legacy `!encr` ciphertext in-place with the new AES-GCM format. After the
-command completes, the warnings disappear and the values are protected by authenticated encryption.
-Commit the updated YAML files — no other code changes are needed.
+For each legacy `!encr` value the command decrypts it with `PYFLEX_CFG_KEY` and writes it back
+in the AES-GCM format. After it completes, the warnings disappear and the values are protected by
+authenticated encryption. Commit the updated YAML files — no other code changes are needed.
+Run `pyflexcfg encrypt --dry-run` first to list the legacy values without touching any file.
 
-To migrate a single value manually:
+A value that has the shape of a legacy ciphertext but does not decrypt with the current key is
+**left untouched**, reported as a warning, and makes the command exit 1. This happens when
+`PYFLEX_CFG_KEY` is not the key the value was encrypted with, and also for a plaintext secret that
+is itself base64 of 32, 48, 64… bytes — the two cannot be told apart. Encrypt such a value manually.
+
+To migrate or encrypt a single value manually:
 
 ```python
 from pyflexcfg import AESCipher
 aes = AESCipher('my-key')
-print(aes.encrypt('the-plaintext'))   # paste this into your YAML
+print(aes.encrypt(aes.decrypt_legacy('old-v2-ciphertext')))   # migrate a v2 value
+print(aes.encrypt('the-plaintext'))                           # encrypt a plaintext value
 ```
 
 ### Pre-commit hook
@@ -351,9 +381,16 @@ db_password: !vault secret/data/myapp/db#password   # KV v2 — field
 all_creds:   !vault secret/myapp/creds               # KV v1 — whole secret → AttrDict
 ```
 
-Path format: `mount/path/to/secret#field`. The `#field` suffix selects one key from the secret's
-data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected automatically when
-the path contains `/data/`; otherwise KV v1 is assumed.
+Path format: `mount/path/to/secret#field`. The first segment is always the mount point, for KV v1
+and KV v2 alike (`kv/team/app` reads `team/app` from the mount `kv`). The `#field` suffix selects
+one key from the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is
+detected automatically when the path contains `/data/`; otherwise KV v1 is assumed.
+
+Everything fetched from Vault is masked. Each leaf value — in a whole secret, or in a field that
+holds a nested object or list — becomes a `Secret`, so `repr(Cfg)` and `pyflexcfg show` print
+`********` for it. Non-string leaves are stored as the `Secret` of their text (`5432` → `'5432'`),
+so convert explicitly where you need the type: `int(Cfg.db.port)`. Do not use `bool()` for that — any
+non-empty string is truthy, so compare instead: `Cfg.db.ssl == 'True'`. `null` values stay `None`.
 
 - The `VaultProvider` singleton is instantiated on the first `!vault` tag hit, not at import.
 - Missing `VAULT_ADDR` or `VAULT_TOKEN` raises `RuntimeError` immediately.
@@ -373,14 +410,19 @@ pyflexcfg show
 # Print config root, project root, and active PYFLEX_ENV
 pyflexcfg env
 
-# Encrypt all plaintext !encr / !encr_kdf values in-place
+# Encrypt plaintext !encr / !encr_kdf values and migrate legacy v2 ciphertexts, in-place
 pyflexcfg encrypt
 
-# Report plaintext values without writing; exit 1 if any found (pre-commit hook)
+# Report plaintext and legacy values without writing; exit 1 if any plaintext is found (pre-commit hook)
 pyflexcfg encrypt --dry-run
 ```
 
 All commands read `PYFLEX_CFG_ROOT_PATH` and `PYFLEX_CFG_KEY` from the environment.
+
+`pyflexcfg encrypt` handles single-token values only. A quoted string, block scalar, anchor, or a
+legacy-looking value it cannot decrypt is never rewritten: it is reported on stderr and the command
+exits 1 (with or without `--dry-run`), so encrypt those manually. Reports name the file, tag, and
+key — never the value.
 
 ---
 

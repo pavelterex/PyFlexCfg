@@ -1,5 +1,6 @@
 import os
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import Any
 
 from yaml import Loader, ScalarNode, SequenceNode
 
@@ -62,11 +63,10 @@ class YamlLoader(Loader):
         def string(loader: Loader, node: SequenceNode) -> str:
             return ''.join(str(i) for i in loader.construct_sequence(node))
 
-        def vault(loader: Loader, node: ScalarNode) -> Secret | AttrDict:
+        def vault(loader: Loader, node: ScalarNode) -> Any:
             from .providers import get_vault_provider
 
-            result = get_vault_provider().fetch(loader.construct_scalar(node))
-            return result if isinstance(result, AttrDict) else Secret(result)
+            return _mask(get_vault_provider().fetch(loader.construct_scalar(node)))
 
         self.add_constructor('!encr', encrypted)
         self.add_constructor('!encr_kdf', encrypted)
@@ -89,3 +89,16 @@ class YamlLoader(Loader):
                 raise RuntimeError(f'Env variable {ENCRYPTION_KEY_ENV_VAR} is not found!')
             self._cipher = AESCipher(key)
         return self._cipher
+
+
+def _mask(value: Any) -> Any:
+    """Wrap every non-null leaf of `value` in `Secret`, keeping dict and list structure."""
+    match value:
+        case dict():
+            return AttrDict({k: _mask(v) for k, v in value.items()})
+        case list():
+            return [_mask(v) for v in value]
+        case None:
+            return None
+        case _:
+            return Secret(str(value))

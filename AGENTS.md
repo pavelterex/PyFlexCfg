@@ -1,8 +1,8 @@
 # AGENTS.md — PyFlexCfg reference for AI coding assistants
 
-PyFlexCfg is an import-time YAML configuration loader for Python. It walks a directory of YAML
-files and exposes the combined tree as attribute-access namespaces on a single global class `Cfg`
-(not an instance). It supports encrypted secrets, environment-variable overrides, env-specific
+PyFlexCfg is a YAML configuration loader for Python that needs no init call. It walks a directory
+of YAML files the first time `Cfg` is imported and exposes the combined tree as attribute-access
+namespaces on that single global class `Cfg` (not an instance). It supports encrypted secrets, environment-variable overrides, env-specific
 config layering, required-key validation, a CLI, and optional HashiCorp Vault integration.
 
 ---
@@ -17,9 +17,12 @@ config layering, required-key validation, a CLI, and optional HashiCorp Vault in
 | `Cfg.apply_env_layer()` | classmethod | Merge `Cfg.env.{PYFLEX_ENV}` into root namespace |
 | `Cfg.validate_required()` | classmethod | Raise `RuntimeError` if any `!required` key is unset |
 | `AESCipher(key)` | class | Encrypt/decrypt secrets for `!encr` / `!encr_kdf` |
-| `AESCipher.encrypt(plaintext)` | method | AES-GCM v1 (SHA-256 KDF) → base64 str |
-| `AESCipher.encrypt_kdf(plaintext)` | method | AES-GCM v2 (PBKDF2, 480k iters) → base64 str |
-| `AESCipher.decrypt(ciphertext)` | method | Self-routing by version byte `\x01`/`\x02` |
+| `AESCipher.encrypt(plaintext)` | method | AES-GCM v1 (SHA-256 KDF) → base64 str, header `PFLX\x01` |
+| `AESCipher.encrypt_kdf(plaintext)` | method | AES-GCM v2 (PBKDF2, 480k iters) → base64 str, header `PFLX\x02` |
+| `AESCipher.decrypt(ciphertext)` | method | Routes by `PFLX` marker + version byte; no marker → v2 AES-CBC |
+| `AESCipher.decrypt_legacy(ciphertext)` | method | Decrypt a v2 AES-CBC ciphertext; no migration warning |
+| `AESCipher.is_encrypted(value)` | staticmethod | `True` for a current-format ciphertext (base64 starts `UEZMWA`) |
+| `AESCipher.is_legacy(value)` | staticmethod | `True` for a value shaped like a v2 AES-CBC ciphertext |
 | `AttrDict` | class | `dict` subclass exposing keys as attributes |
 | `Required` | class | Sentinel for `!required` tag; importable for programmatic injection/testing |
 | `Secret` | class | `str` subclass that masks itself in all repr/str/format output |
@@ -46,8 +49,9 @@ config layering, required-key validation, a CLI, and optional HashiCorp Vault in
 |---|---|---|---|
 | `!encr <base64>` | scalar | `Secret` | Decrypts with `PYFLEX_CFG_KEY` (AES-GCM v1) |
 | `!encr_kdf <base64>` | scalar | `Secret` | Same + PBKDF2 KDF; slower, for critical secrets |
-| `!required` | scalar | `Required` | Raises at startup if not satisfied by an override |
+| `!required` | scalar | `Required` | Raises when `Cfg` loads if not satisfied by an override |
 | `!vault <path>#<field>` | scalar | `Secret` | Fetches from HashiCorp Vault; needs `hvac` installed |
+| `!vault <path>` | scalar | `AttrDict` | Whole secret; every leaf is a `Secret` |
 | `!string [a, b, c]` | sequence | `str` | Joins parts: `"abc"` |
 | `!path [a, b]` | sequence | `Path` | `Path(a, b)` (host-native) |
 | `!path_win [a, b]` | sequence | `PureWindowsPath` | |
@@ -68,34 +72,50 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
 ## Critical gotchas
 
 - **`Cfg` is a class, not an instance.** Always `Cfg.key`, never `cfg = Cfg(); cfg.key`.
-- **Config loading fires at import time** inside the metaclass `__new__`. There is no lazy loading
-  and no explicit `init()`. Importing `pyflexcfg` without a valid config root raises `RuntimeError`
-  immediately.
+- **Config loading fires the first time `Cfg` is requested from the package** — normally the
+  `from pyflexcfg import Cfg` line — inside the metaclass `__new__`. There is no explicit `init()`.
+  Without a valid config root that line raises `RuntimeError`. A bare `import pyflexcfg`, or
+  importing only `AESCipher` / `AttrDict` / `Required` / `Secret`, loads nothing and cannot fail
+  this way.
+- **Only the first load is thread-safe.** Concurrent first requests for `Cfg` load it once behind a
+  lock. `Cfg.reload_config()` and runtime mutation of `Cfg` are not synchronised.
 - **In tests**, call `Cfg.reload_config(config_path=...)` to switch config roots between cases.
-  The `_restore_cfg_after_test` autouse fixture in `conftest.py` does this automatically.
+  The `restore_cfg_after_test` autouse fixture in `conftest.py` does this automatically.
 - **`!encr` decrypts at YAML parse time**, not at attribute access. `PYFLEX_CFG_KEY` must be set
-  before any `import pyflexcfg`, not just before accessing the encrypted value.
-- **`!required` raises at startup** (end of `__init__.py` call to `validate_required()`), not at
-  attribute access time.
+  before `Cfg` is first imported, not just before accessing the encrypted value.
+- **`!required` raises when `Cfg` loads** (the load ends with `validate_required()`), not when the
+  missing key is accessed. Sentinels inside lists are found too and reported with an index
+  (`app.hosts[1]`, `app.servers[0].host`); satisfy them by replacing the whole list, e.g.
+  `CFG__APP__HOSTS='[a, b]::yaml_r'`.
 - **`AttrDict` inherits from `dict`.** Use `Cfg.section.key` (attribute) or `Cfg.section['key']`
   (item) — both work. Call `.as_dict()` before passing to code that expects a plain `dict`.
 - **Directory and file names** under the config root must match `^[a-z][a-z0-9_]{0,28}[a-z0-9]$`.
   Files that don't match are silently skipped.
 - **`!encr` v2 → v3 migration.** v2 ciphertexts (AES-CBC) still decrypt in v3 but log
-  `logging.WARNING` on every load. Migrate with `pyflexcfg encrypt` — rewrites all legacy
-  ciphertexts in-place to AES-GCM. No code changes required; commit the updated YAML files.
+  `logging.WARNING` on every load. Migrate with `pyflexcfg encrypt` — it decrypts each legacy value
+  with `PYFLEX_CFG_KEY` and rewrites it in-place as AES-GCM. No code changes required; commit the
+  updated YAML files.
+- **`pyflexcfg encrypt` skips what it cannot safely rewrite** — quoted strings, block scalars,
+  anchors, and legacy-shaped values that do not decrypt with the current key (wrong key, or plaintext
+  that is itself base64 of 32/48/64… bytes). These are reported on stderr and the command exits 1;
+  encrypt them manually with `AESCipher.encrypt()`.
+- **Every `!vault` leaf is a `Secret` holding text.** A Vault number or boolean arrives as
+  `Secret('5432')` / `Secret('True')`; convert with `int(...)` or compare to `'True'` — `bool()` on it
+  is always truthy. `null` stays `None`.
+- **Ciphertext format is `PFLX` + version byte + payload.** Never detect encryption by the first
+  byte alone; use `AESCipher.is_encrypted()`.
 
 ---
 
 ## Test environment setup
 
 ```python
-# Must happen BEFORE any pyflexcfg import
+# Must happen BEFORE Cfg is first imported
 import os
 os.environ['PYFLEX_CFG_ROOT_PATH'] = '/path/to/config'
 os.environ['PYFLEX_CFG_KEY'] = 'test-key-at-least-32-chars-long!!'
 
-from pyflexcfg import Cfg  # metaclass fires here
+from pyflexcfg import Cfg  # config loads here
 ```
 
 ---

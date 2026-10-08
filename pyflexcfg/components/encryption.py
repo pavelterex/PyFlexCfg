@@ -15,16 +15,20 @@ from .abstractclasses import ICipher
 logger = logging.getLogger(__name__)
 
 
-class _V:
-    FAST = b'\x01'
-    KDF = b'\x02'
-
-
-_GCM_NONCE_SIZE = 12
-_KDF_SALT_SIZE = 16
-_KDF_ITERATIONS = 480_000
-_MIN_KEY_LEN = 32
 _CBC_BLOCK_SIZE = 16
+_GCM_NONCE_SIZE = 12
+_KDF_ITERATIONS = 480_000
+_KDF_SALT_SIZE = 16
+_MAGIC = b'PFLX'
+_MIN_KEY_LEN = 32
+
+
+class _V:
+    FAST = _MAGIC + b'\x01'
+    KDF = _MAGIC + b'\x02'
+
+
+_HEADER_SIZE = len(_V.FAST)
 
 
 class AESCipher(ICipher):
@@ -47,11 +51,85 @@ class AESCipher(ICipher):
         self._passphrase = key.encode('utf-8')
         self._key = hashlib.sha256(self._passphrase).digest()
 
+    def decrypt(self, ciphertext: bytes | str) -> str:
+        """
+        Decrypt a ciphertext produced by :meth:`encrypt` or :meth:`encrypt_kdf`.
+
+        Routes by the header (``PFLX`` marker + version byte). Input without the
+        marker is treated as a v2 AES-CBC ciphertext and decrypted with a WARNING.
+
+        Args:
+            ciphertext: Base64 ciphertext string or bytes.
+
+        Returns:
+            Decrypted plaintext string.
+
+        Raises:
+            RuntimeError: Unknown version byte, or input in neither format.
+            ValueError: Wrong key or corrupted ciphertext.
+        """
+        raw = base64.b64decode(ciphertext)
+        header, body = raw[:_HEADER_SIZE], raw[_HEADER_SIZE:]
+
+        match header:
+            case _V.FAST:
+                nonce = body[:_GCM_NONCE_SIZE]
+                ct = body[_GCM_NONCE_SIZE:]
+                key = self._key
+            case _V.KDF:
+                salt = body[:_KDF_SALT_SIZE]
+                nonce = body[_KDF_SALT_SIZE : _KDF_SALT_SIZE + _GCM_NONCE_SIZE]
+                ct = body[_KDF_SALT_SIZE + _GCM_NONCE_SIZE :]
+                key = self._derive_key(salt)
+            case _ if header.startswith(_MAGIC):
+                raise RuntimeError(f'Unknown ciphertext version: {header[-1:]!r}')
+            case _ if _has_cbc_shape(raw):
+                logger.warning(
+                    'Legacy AES-CBC ciphertext decrypted successfully. '
+                    'Run `pyflexcfg encrypt` to migrate all !encr values to AES-GCM.'
+                )
+                return self.decrypt_legacy(ciphertext)
+            case _:
+                raise RuntimeError('Unrecognized ciphertext format')
+
+        try:
+            return AESGCM(key).decrypt(nonce, ct, None).decode('utf-8')
+        except InvalidTag:
+            raise ValueError('Decryption failed: wrong key or corrupted ciphertext')
+
+    def decrypt_legacy(self, ciphertext: bytes | str) -> str:
+        """
+        Decrypt a v2 AES-CBC ciphertext (base64 of ``iv[16] + ct``, no header).
+
+        Args:
+            ciphertext: Base64 ciphertext string or bytes.
+
+        Returns:
+            Decrypted plaintext string.
+
+        Raises:
+            ValueError: Not CBC-shaped, wrong key, or corrupted ciphertext.
+        """
+        raw = base64.b64decode(ciphertext)
+
+        if not _has_cbc_shape(raw):
+            raise ValueError('Not a legacy AES-CBC ciphertext')
+
+        iv, ct = raw[:_CBC_BLOCK_SIZE], raw[_CBC_BLOCK_SIZE:]
+        decryptor = Cipher(algorithms.AES(self._key), modes.CBC(iv)).decryptor()
+        unpadder = _padding.PKCS7(_CBC_BLOCK_SIZE * 8).unpadder()
+
+        try:
+            padded = decryptor.update(ct) + decryptor.finalize()
+            return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
+        except ValueError:
+            raise ValueError('Decryption failed: wrong key or corrupted ciphertext') from None
+
     def encrypt(self, plaintext: str) -> str:
         """
         Encrypt with AES-GCM using SHA-256(passphrase) as the key.
 
-        Ciphertext format (base64): ``\\x01 + nonce[12] + gcm_output``.
+        Ciphertext format (base64): ``PFLX + \\x01 + nonce[12] + gcm_output``.
 
         Args:
             plaintext: String to encrypt.
@@ -69,7 +147,7 @@ class AESCipher(ICipher):
 
         Slower than :meth:`encrypt`; intended for crown-jewel secrets where
         brute-force resistance of the key derivation matters.
-        Ciphertext format (base64): ``\\x02 + salt[16] + nonce[12] + gcm_output``.
+        Ciphertext format (base64): ``PFLX + \\x02 + salt[16] + nonce[12] + gcm_output``.
 
         Args:
             plaintext: String to encrypt.
@@ -83,49 +161,16 @@ class AESCipher(ICipher):
         ct = AESGCM(key).encrypt(nonce, plaintext.encode('utf-8'), None)
         return base64.b64encode(_V.KDF + salt + nonce + ct).decode('ascii')
 
-    def decrypt(self, ciphertext: bytes | str) -> str:
-        """
-        Decrypt a ciphertext produced by :meth:`encrypt` or :meth:`encrypt_kdf`.
+    @staticmethod
+    def is_encrypted(value: bytes | str) -> bool:
+        """Tell whether `value` is a ciphertext in the current AES-GCM format."""
+        return _decode_strict(value)[:_HEADER_SIZE] in (_V.FAST, _V.KDF)
 
-        Routes automatically by the version byte embedded in the ciphertext.
-
-        Args:
-            ciphertext: Base64 ciphertext string or bytes.
-
-        Returns:
-            Decrypted plaintext string.
-
-        Raises:
-            RuntimeError: Legacy AES-CBC ciphertext detected, or unknown version byte.
-            ValueError: Authentication tag mismatch (wrong key or tampered ciphertext).
-        """
-        raw = base64.b64decode(ciphertext)
-        version = raw[:1]
-
-        match version:
-            case _V.FAST:
-                nonce = raw[1 : 1 + _GCM_NONCE_SIZE]
-                ct = raw[1 + _GCM_NONCE_SIZE :]
-                key = self._key
-            case _V.KDF:
-                salt = raw[1 : 1 + _KDF_SALT_SIZE]
-                nonce = raw[1 + _KDF_SALT_SIZE : 1 + _KDF_SALT_SIZE + _GCM_NONCE_SIZE]
-                ct = raw[1 + _KDF_SALT_SIZE + _GCM_NONCE_SIZE :]
-                key = self._derive_key(salt)
-            case _:
-                if len(raw) >= _CBC_BLOCK_SIZE * 2 and len(raw) % _CBC_BLOCK_SIZE == 0:
-                    logger.warning(
-                        'Legacy AES-CBC ciphertext decrypted successfully. '
-                        'Run `pyflexcfg encrypt` to migrate all !encr values to AES-GCM.'
-                    )
-                    return self._decrypt_legacy_cbc(raw)
-
-                raise RuntimeError(f'Unknown ciphertext version: {version!r}')
-
-        try:
-            return AESGCM(key).decrypt(nonce, ct, None).decode('utf-8')
-        except InvalidTag:
-            raise ValueError('Decryption failed: wrong key or corrupted ciphertext')
+    @staticmethod
+    def is_legacy(value: bytes | str) -> bool:
+        """Tell whether `value` has the shape of a v2 AES-CBC ciphertext."""
+        raw = _decode_strict(value)
+        return not raw.startswith(_MAGIC) and _has_cbc_shape(raw)
 
     def _derive_key(self, salt: bytes) -> bytes:
         return PBKDF2HMAC(
@@ -135,10 +180,14 @@ class AESCipher(ICipher):
             iterations=_KDF_ITERATIONS,
         ).derive(self._passphrase)
 
-    def _decrypt_legacy_cbc(self, raw: bytes) -> str:
-        """AES-CBC + PKCS7 decrypt for v2 ciphertexts (no version byte, iv[16] + ct)."""
-        iv, ct = raw[:_CBC_BLOCK_SIZE], raw[_CBC_BLOCK_SIZE:]
-        decryptor = Cipher(algorithms.AES(self._key), modes.CBC(iv)).decryptor()
-        padded = decryptor.update(ct) + decryptor.finalize()
-        unpadder = _padding.PKCS7(_CBC_BLOCK_SIZE * 8).unpadder()
-        return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
+
+def _decode_strict(value: bytes | str) -> bytes:
+    """Base64-decode `value`, returning empty bytes when it is not valid base64."""
+    try:
+        return base64.b64decode(value, validate=True)
+    except ValueError:
+        return b''
+
+
+def _has_cbc_shape(raw: bytes) -> bool:
+    return len(raw) >= _CBC_BLOCK_SIZE * 2 and len(raw) % _CBC_BLOCK_SIZE == 0

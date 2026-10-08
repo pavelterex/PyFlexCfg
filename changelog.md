@@ -8,16 +8,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
-- **`!encr` ciphertext format changed (AES-CBC → AES-GCM).** New encryptions use AES-GCM. Existing
-  CBC ciphertexts are **decrypted transparently** but emit a `logging.WARNING` on every load; run
-  `pyflexcfg encrypt` to migrate all values to AES-GCM and silence the warning.
+- **`!encr` ciphertext format changed (AES-CBC → AES-GCM).** New encryptions use AES-GCM and start
+  with the 4-byte marker `PFLX` plus a version byte (base64 prefix `UEZMWA`). Existing CBC
+  ciphertexts carry no marker and are **decrypted transparently**, but emit a `logging.WARNING` on
+  every load; run `pyflexcfg encrypt` to migrate all values to AES-GCM and silence the warning.
 
 ### Added
 
 - **`!encr_kdf` YAML tag** — AES-GCM encryption with PBKDF2HMAC (SHA-256, 480k iterations, random
   salt) for crown-jewel secrets. `AESCipher.encrypt_kdf(plaintext)` produces the ciphertext.
-  `AESCipher.decrypt()` is self-routing: it reads the version byte (`\x01` for fast, `\x02` for
-  KDF) so both tags share the same decrypt path.
+  `AESCipher.decrypt()` is self-routing: it reads the version byte after the `PFLX` marker (`\x01`
+  for fast, `\x02` for KDF) so both tags share the same decrypt path.
+- **`AESCipher.is_encrypted()`, `AESCipher.is_legacy()`, `AESCipher.decrypt_legacy()`** — classify
+  a value as current-format or v2-shaped, and decrypt a v2 AES-CBC ciphertext explicitly.
 - **`PYFLEX_ENV` environment layering.** Set `PYFLEX_ENV=dev` to deep-merge `Cfg.env.dev` into the
   root `Cfg` namespace after YAML loading. Layering order (lowest → highest): base YAML →
   env-layer merge → `CFG__*` env-var overrides → `validate_required()`.
@@ -25,22 +28,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `reload_config()`.
 - **`!required` YAML tag + `Cfg.validate_required()`.** Mark any scalar value `!required` to
   declare it must be supplied at runtime. If any `!required` sentinels survive all override layers,
-  `validate_required()` raises `RuntimeError` listing every missing dotted path.
+  `validate_required()` raises `RuntimeError` listing every missing dotted path. Sentinels inside
+  lists are detected as well and reported with their index (`app.hosts[1]`).
 - **CLI — `python -m pyflexcfg` (or `pyflexcfg` after install).**
   - `pyflexcfg show` — print the effective merged config as YAML (secrets masked).
   - `pyflexcfg env` — print config root, project root, and active `PYFLEX_ENV`.
-  - `pyflexcfg encrypt [--dry-run]` — walk all YAML files and encrypt any plaintext `!encr` /
-    `!encr_kdf` values in-place. `--dry-run` reports without writing and exits 1 if any are found
-    (drop-in pre-commit hook).
+  - `pyflexcfg encrypt [--dry-run]` — walk all YAML files, encrypt any plaintext `!encr` /
+    `!encr_kdf` values and migrate legacy AES-CBC ciphertexts, in-place. `--dry-run` reports without
+    writing and exits 1 if any plaintext is found (drop-in pre-commit hook). Values it cannot safely
+    rewrite (quoted or block scalars, anchors, legacy-shaped values that do not decrypt with the
+    current key) are left untouched, reported on stderr, and make the command exit 1. Reports name
+    the file, tag, and key — never the value.
 - **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
   (`hvac` dependency). Path format: `mount/path#field` — the `#field` suffix selects a key from
   the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
   when the path contains `/data/`; otherwise KV v1 is assumed. The `VaultProvider` singleton is
-  initialised on the first `!vault` tag hit.
+  initialised on the first `!vault` tag hit. Every non-null leaf fetched — in a single field, a
+  whole secret, or a nested object or list — is wrapped in `Secret`; non-string leaves are stored as
+  the `Secret` of their text.
 - **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
   `len(PYFLEX_CFG_KEY) < 32`.
 - **`Required` class exported from the package root** (`from pyflexcfg import Required`). Useful
   for programmatic sentinel injection and test assertions.
+
+### Changed
+
+- **`Cfg` loads on first access instead of when the package is imported.** `from pyflexcfg import Cfg`
+  behaves as before: it loads the config and raises on a missing config root or unsatisfied
+  `!required` key. A bare `import pyflexcfg`, or importing only `AESCipher`, `AttrDict`, `Required`
+  or `Secret`, no longer loads anything or needs a config directory; code relying on a bare
+  `import pyflexcfg` to fail fast must reference `pyflexcfg.Cfg`. The first load is guarded by a
+  lock, so threads requesting `Cfg` simultaneously load it once; `reload_config()` and runtime
+  mutation remain unsynchronised.
 
 ### Security
 
