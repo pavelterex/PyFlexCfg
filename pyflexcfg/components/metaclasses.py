@@ -15,6 +15,8 @@ from .yaml_dumper import YamlDumper
 from .yaml_loader import YamlLoader
 
 _NAME_RE = re.compile(NAME_REGEX_STRING)
+# Class attributes `reload_config` assigns that are not config values.
+_RESERVED_ATTRS = {'config_root', 'project_root'}
 
 
 class HandlerMeta(type):
@@ -47,7 +49,7 @@ class HandlerMeta(type):
 
     def __str__(cls) -> str:
         """Return the current configuration formatted as YAML."""
-        dct = {k: v for k, v in cls.__dict__.items() if not k.startswith('_') and not callable(getattr(cls, k))}
+        dct = {key: cls.__dict__[key] for key in cls._config_keys()}
         return yaml.dump(dct, Dumper=YamlDumper, indent=4, default_flow_style=False, sort_keys=False)
 
     @classmethod
@@ -142,6 +144,14 @@ class HandlerMeta(type):
             return tuple(cls.to_attrdict(item) for item in data)
 
         return data
+
+    def _config_keys(cls) -> list[str]:
+        """Names of the class attributes that hold config values, not handler machinery."""
+        return [
+            key
+            for key in cls.__dict__
+            if not key.startswith('_') and key not in _RESERVED_ATTRS and not callable(getattr(cls, key))
+        ]
 
     @classmethod
     def _load_yaml_from_file(cls, dct: AttrDict, file: Path) -> None:

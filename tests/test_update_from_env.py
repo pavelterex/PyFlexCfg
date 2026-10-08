@@ -106,6 +106,18 @@ def test_string_override(loaded_cfg, monkeypatch):
     assert loaded_cfg.general.host == 'remote.example.com', f'got {loaded_cfg.general.host!r}'
 
 
+def test_top_level_override_dropped_on_reload_after_var_removed(loaded_cfg, monkeypatch):
+    monkeypatch.setenv('CFG__ADHOC', 'temporary')
+    loaded_cfg.update_from_env()
+    assert loaded_cfg.adhoc == 'temporary', 'top-level override must be applied first'
+
+    monkeypatch.delenv('CFG__ADHOC')
+    loaded_cfg.reload_config()
+
+    assert not hasattr(loaded_cfg, 'adhoc'), 'top-level override survived a reload without its env var'
+    assert loaded_cfg.general.host == 'localhost', 'file-backed config must be reloaded'
+
+
 def test_unknown_yaml_suffix_falls_back_to_auto_coercion(loaded_cfg, monkeypatch):
     """Bare ::yaml is no longer a known suffix; value falls through to autodetect."""
     monkeypatch.setenv('CFG__GENERAL__HOST', '42::yaml')

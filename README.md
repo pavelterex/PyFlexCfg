@@ -417,12 +417,20 @@ pyflexcfg encrypt
 pyflexcfg encrypt --dry-run
 ```
 
-All commands read `PYFLEX_CFG_ROOT_PATH` and `PYFLEX_CFG_KEY` from the environment.
+All commands read `PYFLEX_CFG_ROOT_PATH` and `PYFLEX_CFG_KEY` from the environment. `encrypt` exits 1
+with an error if the config root is missing, is not a directory, or contains no `.yaml` / `.yml`
+files, so a misconfigured pre-commit hook fails instead of passing silently.
 
-`pyflexcfg encrypt` handles single-token values only. A quoted string, block scalar, anchor, or a
-legacy-looking value it cannot decrypt is never rewritten: it is reported on stderr and the command
-exits 1 (with or without `--dry-run`), so encrypt those manually. Reports name the file, tag, and
-key — never the value.
+`pyflexcfg encrypt` reads each file with a YAML tokenizer, so it acts only on real `!encr` /
+`!encr_kdf` tags. Text that merely mentions `!encr` — inside a string or a comment — is never
+touched, and the rest of the file (comments, layout, line endings) is preserved byte for byte.
+Plain, quoted and flow-style values are all handled; a quoted value is written back unquoted,
+since ciphertext needs no quoting.
+
+What it will not rewrite: a block scalar (`|` or `>`), a value carrying an anchor or alias, a tag
+with no value, a legacy-looking value it cannot decrypt, and any file the tokenizer rejects. Each is
+reported on stderr and makes the command exit 1 (with or without `--dry-run`), so encrypt those
+manually. Reports give the file, line, tag and key — never the value.
 
 ---
 
@@ -435,7 +443,12 @@ validation).
 - `config_path` — switch config roots (handy in tests). Defaults to the current `Cfg.config_root`.
 - `project_root` — explicit project root for `!proj_root`. When omitted, resolved from env vars.
   Pass this to override without touching the environment (the typical test pattern).
-- `reset=False` — overlay loaded top-level keys without dropping siblings.
+- `reset=True` (default) — first drop every existing config value, whatever put it there: YAML
+  files, the env layer, `CFG__*` overrides, or your own assignments to `Cfg`. The result reflects
+  only what is on disk and in the environment now, so switching `PYFLEX_ENV` or removing a `CFG__*`
+  variable and reloading leaves nothing behind.
+- `reset=False` — overlay loaded top-level keys without dropping siblings. Values that came from a
+  previous env layer or override, and that the new load does not set, stay as they were.
 
 ---
 

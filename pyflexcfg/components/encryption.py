@@ -84,11 +84,12 @@ class AESCipher(ICipher):
             case _ if header.startswith(_MAGIC):
                 raise RuntimeError(f'Unknown ciphertext version: {header[-1:]!r}')
             case _ if _has_cbc_shape(raw):
+                plaintext = self.decrypt_legacy(ciphertext)
                 logger.warning(
                     'Legacy AES-CBC ciphertext decrypted successfully. '
                     'Run `pyflexcfg encrypt` to migrate all !encr values to AES-GCM.'
                 )
-                return self.decrypt_legacy(ciphertext)
+                return plaintext
             case _:
                 raise RuntimeError('Unrecognized ciphertext format')
 

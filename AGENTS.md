@@ -95,10 +95,15 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
   `logging.WARNING` on every load. Migrate with `pyflexcfg encrypt` — it decrypts each legacy value
   with `PYFLEX_CFG_KEY` and rewrites it in-place as AES-GCM. No code changes required; commit the
   updated YAML files.
-- **`pyflexcfg encrypt` skips what it cannot safely rewrite** — quoted strings, block scalars,
-  anchors, and legacy-shaped values that do not decrypt with the current key (wrong key, or plaintext
-  that is itself base64 of 32/48/64… bytes). These are reported on stderr and the command exits 1;
-  encrypt them manually with `AESCipher.encrypt()`.
+- **`pyflexcfg encrypt` acts only on real `!encr` / `!encr_kdf` tags** (it tokenizes the YAML), so
+  `!encr` mentioned in a string or comment is ignored. Plain, quoted and flow-style values are
+  handled. It skips what it cannot safely rewrite — block scalars, anchored values, tags with no
+  value, unparsable files, and legacy-shaped values that do not decrypt with the current key (wrong
+  key, or plaintext that is itself base64 of 32/48/64… bytes). These are reported on stderr and the
+  command exits 1; encrypt them manually with `AESCipher.encrypt()`.
+- **`Cfg.reload_config()` with the default `reset=True` drops every config value first**, including
+  ones set by the env layer, `CFG__*` overrides or runtime assignment. `reset=False` keeps anything
+  the new load does not overwrite.
 - **Every `!vault` leaf is a `Secret` holding text.** A Vault number or boolean arrives as
   `Secret('5432')` / `Secret('True')`; convert with `int(...)` or compare to `'True'` — `bool()` on it
   is always truthy. `null` stays `None`.

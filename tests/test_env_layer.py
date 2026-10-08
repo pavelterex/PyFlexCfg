@@ -6,6 +6,7 @@ import pytest
 
 from pyflexcfg import Cfg
 
+_DEV_LAYER_YAML = 'app:\n  host: dev\nlog_level: debug\nreplicas: [a, b]\nextras:\n  flag: true\n'
 _ENV_LAYER_CONFIG = Path(__file__).parent / 'test_data' / 'env_layer_config'
 
 
@@ -74,3 +75,24 @@ def test_env_layer_overridden_by_cfg_env_var(monkeypatch, env_config):
     monkeypatch.setenv('CFG__DATABASE__HOST', 'override-host')
     Cfg.reload_config(config_path=_ENV_LAYER_CONFIG)
     assert Cfg.database.host == 'override-host'
+
+
+@pytest.mark.parametrize('next_env', ['prd', None], ids=['switch to prd', 'unset'])
+def test_env_layer_values_dropped_on_reload_after_switch(monkeypatch, tmp_path, next_env):
+    (tmp_path / 'env').mkdir()
+    (tmp_path / 'app.yaml').write_text('host: base\n', encoding='utf-8')
+    (tmp_path / 'env' / 'dev.yaml').write_text(_DEV_LAYER_YAML, encoding='utf-8')
+    (tmp_path / 'env' / 'prd.yaml').write_text('app:\n  host: prd\n', encoding='utf-8')
+    monkeypatch.setenv('PYFLEX_ENV', 'dev')
+    Cfg.reload_config(config_path=tmp_path)
+    assert Cfg.log_level == 'debug', 'dev layer must be applied before the switch'
+
+    if next_env:
+        monkeypatch.setenv('PYFLEX_ENV', next_env)
+    else:
+        monkeypatch.delenv('PYFLEX_ENV')
+    Cfg.reload_config()
+
+    assert Cfg.app.host == (next_env or 'base'), f'got {Cfg.app.host!r}'
+    for stale in ('log_level', 'replicas', 'extras'):
+        assert not hasattr(Cfg, stale), f'{stale!r} from the dev layer survived the reload'

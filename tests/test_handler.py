@@ -120,6 +120,14 @@ class TestHandler:
         assume(data.var_bool_false is False)
         assume(data.var_null is None)
 
+    def test_str_lists_only_config_after_reload(self):
+        Cfg.reload_config()
+        dumped = str(Cfg)
+
+        assert 'app:' in dumped, f'config must still be rendered, got {dumped!r}'
+        for handler_attr in ('config_root', 'project_root'):
+            assert handler_attr not in dumped, f'{handler_attr!r} is not a config value but was rendered'
+
 
 class TestTmpPath:
     """

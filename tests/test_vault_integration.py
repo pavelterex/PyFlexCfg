@@ -62,23 +62,23 @@ def vault_server():
     )
     container_id = result.stdout.strip()
 
-    for _ in range(30):
-        if _vault_ready():
-            break
-        time.sleep(0.5)
-    else:
+    try:
+        for _ in range(30):
+            if _vault_ready():
+                break
+            time.sleep(0.5)
+        else:
+            pytest.fail('Vault container did not become ready within 15 s')
+
+        # Dev mode mounts KV v2 at secret/
+        _seed(container_id, 'secret/myapp/db', password='hunter2', user='admin')
+        _seed(container_id, 'secret/myapp/api', key='abc123')
+        _vault(container_id, 'secrets', 'enable', '-path=kv1', '-version=1', 'kv')
+        _seed(container_id, 'kv1/myapp/legacy', token='v1-token')
+
+        yield container_id
+    finally:
         subprocess.run(['docker', 'stop', container_id], capture_output=True, check=False)
-        pytest.fail('Vault container did not become ready within 15 s')
-
-    # Dev mode mounts KV v2 at secret/
-    _seed(container_id, 'secret/myapp/db', password='hunter2', user='admin')
-    _seed(container_id, 'secret/myapp/api', key='abc123')
-    _vault(container_id, 'secrets', 'enable', '-path=kv1', '-version=1', 'kv')
-    _seed(container_id, 'kv1/myapp/legacy', token='v1-token')
-
-    yield container_id
-
-    subprocess.run(['docker', 'stop', container_id], capture_output=True, check=False)
 
 
 def test_kv1_fetch_field(vault_env):

@@ -35,10 +35,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `pyflexcfg env` — print config root, project root, and active `PYFLEX_ENV`.
   - `pyflexcfg encrypt [--dry-run]` — walk all YAML files, encrypt any plaintext `!encr` /
     `!encr_kdf` values and migrate legacy AES-CBC ciphertexts, in-place. `--dry-run` reports without
-    writing and exits 1 if any plaintext is found (drop-in pre-commit hook). Values it cannot safely
-    rewrite (quoted or block scalars, anchors, legacy-shaped values that do not decrypt with the
-    current key) are left untouched, reported on stderr, and make the command exit 1. Reports name
-    the file, tag, and key — never the value.
+    writing and exits 1 if any plaintext is found (drop-in pre-commit hook). Only real YAML tags are
+    acted on, so `!encr` mentioned in a string or comment is ignored; plain, quoted and flow-style
+    values are handled, and the rest of the file is preserved byte for byte. Values it cannot safely
+    rewrite (block scalars, anchored values, tags with no value, unparsable files, legacy-shaped
+    values that do not decrypt with the current key) are left untouched, reported on stderr, and
+    make the command exit 1. Reports name the file, line, tag and key — never the value. A missing
+    or non-directory config root, or one with no YAML files, is an error (exit 1), not an empty scan.
 - **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
   (`hvac` dependency). Path format: `mount/path#field` — the `#field` suffix selects a key from
   the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
@@ -60,6 +63,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `import pyflexcfg` to fail fast must reference `pyflexcfg.Cfg`. The first load is guarded by a
   lock, so threads requesting `Cfg` simultaneously load it once; `reload_config()` and runtime
   mutation remain unsynchronised.
+- **`Cfg.reload_config(reset=True)` now drops every config value before loading**, not only
+  mapping-valued ones. Top-level scalars and lists set by the env layer, a `CFG__*` override or
+  runtime assignment no longer survive a reload after their source is gone. `reset=False` is
+  unchanged.
 
 ### Security
 

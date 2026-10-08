@@ -4,13 +4,25 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 from conftest import TEST_CBC_CIPHERTEXT, TEST_ENCRYPTED_STRING, TEST_KEY, TEST_STRING
 
 from pyflexcfg.components.encryption import AESCipher
+from pyflexcfg.components.yaml_loader import YamlLoader
 
 _CLI_CONFIG = Path(__file__).parent / 'test_data' / 'cli_config'
 _PYTHON = sys.executable
+
+
+@pytest.mark.parametrize('args', [('encrypt',), ('encrypt', '--dry-run')], ids=['write', 'dry-run'])
+def test_encrypt_config_root_without_yaml_fails(tmp_path, args):
+    (tmp_path / 'notes.txt').write_text('secret: !encr myvalue\n', encoding='utf-8')
+    result = _run(*args, config_root=tmp_path)
+
+    assert result.returncode == 1, f'a root with no YAML files must fail the run, got stdout {result.stdout!r}'
+    assert 'no YAML files' in result.stderr, f'got {result.stderr!r}'
+    assert 'already encrypted' not in result.stdout, 'must not report success when nothing was scanned'
 
 
 def test_encrypt_dry_run_all_clean(tmp_path):
@@ -37,14 +49,48 @@ def test_encrypt_dry_run_reports_legacy_without_writing(tmp_path):
     assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'dry run must not write'
 
 
-def test_encrypt_dry_run_unsupported_scalar_exits_nonzero(tmp_path):
-    original = 'secret: !encr "two words"\n'
+@pytest.mark.parametrize(
+    'value',
+    [
+        pytest.param('|\n  block text', id='block scalar'),
+        pytest.param('&anchor anchored', id='anchored scalar'),
+        pytest.param('', id='no value'),
+    ],
+)
+def test_encrypt_dry_run_unsupported_scalar_exits_nonzero(tmp_path, value):
+    original = f'secret: !encr {value}\nother: 1\n'
     (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
     result = _run('encrypt', '--dry-run', config_root=tmp_path)
 
-    assert result.returncode == 1, 'a quoted value may be plaintext, so the check must fail'
-    assert 'unsupported scalar form' in result.stderr, f'got {result.stderr!r}'
+    assert result.returncode == 1, 'an unsupported value may be plaintext, so the check must fail'
+    assert 'encrypt manually' in result.stderr, f'got {result.stderr!r}'
     assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must stay untouched'
+
+
+def test_encrypt_flow_style_value_encrypted(tmp_path):
+    (tmp_path / 'app.yaml').write_text('creds: {user: admin, password: !encr hunter2}\n', encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path)
+    creds = yaml.load((tmp_path / 'app.yaml').read_text(encoding='utf-8'), YamlLoader)['creds']
+
+    assert result.returncode == 0, f'got {result.stderr!r}'
+    assert creds['user'] == 'admin', 'sibling value in the flow mapping must survive'
+    assert creds['password'] == 'hunter2', 'flow-style value must decrypt to the original secret'
+
+
+def test_encrypt_ignores_tag_text_outside_tag_position(tmp_path):
+    original = (
+        'note: "docs say write !encr token in yaml"\n'
+        'hint: put !encr myvalue here\n'
+        'port: 8080  # used to be !encr oldvalue\n'
+        '# secret: !encr commented\n'
+    )
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path)
+    dry_run = _run('encrypt', '--dry-run', config_root=tmp_path)
+
+    assert result.returncode == 0, f'got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'non-tag text must not be rewritten'
+    assert dry_run.returncode == 0, 'text that merely mentions !encr is not a plaintext secret'
 
 
 def test_encrypt_legacy_wrong_key_left_untouched(tmp_path):
@@ -67,6 +113,19 @@ def test_encrypt_migrates_legacy_ciphertext(tmp_path):
     assert AESCipher(TEST_KEY).decrypt(migrated) == TEST_STRING, 'migrated value must hold the original secret'
 
 
+@pytest.mark.parametrize('kind', ['missing', 'file'])
+@pytest.mark.parametrize('args', [('encrypt',), ('encrypt', '--dry-run')], ids=['write', 'dry-run'])
+def test_encrypt_missing_config_root_fails(tmp_path, kind, args):
+    config_root = tmp_path / 'not_a_dir'
+    if kind == 'file':
+        config_root.write_text('secret: !encr myvalue\n', encoding='utf-8')
+    result = _run(*args, config_root=config_root)
+
+    assert result.returncode == 1, f'a {kind} config root must fail the run, got stdout {result.stdout!r}'
+    assert 'is not a directory' in result.stderr, f'got {result.stderr!r}'
+    assert 'already encrypted' not in result.stdout, 'must not report success for a root it never scanned'
+
+
 def test_encrypt_output_omits_values(tmp_path):
     content = f'plain: !encr myplainvalue\nlegacy: !encr {TEST_CBC_CIPHERTEXT}\nquoted: !encr "two words"\n'
     (tmp_path / 'app.yaml').write_text(content, encoding='utf-8')
@@ -86,6 +145,18 @@ def test_encrypt_preserves_comments(tmp_path):
     assert '# inline comment' in updated
 
 
+@pytest.mark.parametrize('newline', ['\n', '\r\n'], ids=['LF', 'CRLF'])
+def test_encrypt_preserves_line_endings(tmp_path, newline):
+    content = newline.join(['name: myapp', 'secret: !encr myvalue', 'port: 8080', ''])
+    (tmp_path / 'app.yaml').write_bytes(content.encode('utf-8'))
+    _run('encrypt', config_root=tmp_path)
+    updated = (tmp_path / 'app.yaml').read_bytes().decode('utf-8')
+
+    assert 'myvalue' not in updated, 'value must be encrypted'
+    assert updated.count(newline) == 3, f'line endings changed: {updated!r}'
+    assert updated.replace('\r\n', '').count('\n') == (3 if newline == '\n' else 0), f'mixed endings: {updated!r}'
+
+
 def test_encrypt_preserves_other_keys(tmp_path):
     (tmp_path / 'app.yaml').write_text('name: myapp\nport: 8080\nsecret: !encr myvalue\n', encoding='utf-8')
     _run('encrypt', config_root=tmp_path)
@@ -93,6 +164,19 @@ def test_encrypt_preserves_other_keys(tmp_path):
     # Check non-encr keys are preserved via raw text (safe_load can't handle !encr tags)
     assert 'name: myapp' in updated_text
     assert 'port: 8080' in updated_text
+
+
+def test_encrypt_quoted_value_round_trips(tmp_path):
+    (tmp_path / 'app.yaml').write_text('secret: !encr "two words"  # keep me\nother: 1\n', encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path)
+    updated = (tmp_path / 'app.yaml').read_text(encoding='utf-8')
+    loaded = yaml.load(updated, YamlLoader)
+
+    assert result.returncode == 0, f'got {result.stderr!r}'
+    assert 'two words' not in updated, 'quoted plaintext must be gone from the file'
+    assert loaded['secret'] == 'two words', 'the whole quoted value must be encrypted, not its first word'
+    assert '# keep me' in updated, 'trailing comment must survive'
+    assert loaded['other'] == 1, 'following key must survive'
 
 
 def test_encrypt_rewrites_plaintext_value(tmp_path):
@@ -116,6 +200,17 @@ def test_encrypt_unknown_cmd_exits_nonzero():
     result = _run('badcmd')
     assert result.returncode == 1
     assert 'Unknown' in result.stderr or 'Available' in result.stderr
+
+
+def test_encrypt_unparsable_file_reported_without_content(tmp_path):
+    original = 'secret: !encr myvalue\nbroken: "unclosed hunter2\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path)
+
+    assert result.returncode == 1, 'a file that cannot be parsed must fail the run'
+    assert 'cannot be parsed as YAML' in result.stderr, f'got {result.stderr!r}'
+    assert 'hunter2' not in result.stdout + result.stderr, 'file content must not be echoed'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must stay untouched'
 
 
 def test_env_not_set_shows_placeholder():

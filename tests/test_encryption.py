@@ -153,6 +153,15 @@ def test_legacy_cbc_warns_to_migrate(cipher, caplog):
     assert any('pyflexcfg encrypt' in r.message for r in caplog.records)
 
 
+def test_legacy_cbc_wrong_key_does_not_warn_of_success(caplog):
+    with caplog.at_level(logging.WARNING, logger='pyflexcfg'), pytest.raises(ValueError, match='Decryption failed'):
+        AESCipher('not-the-key').decrypt(TEST_CBC_CIPHERTEXT)
+
+    assert not any('decrypted successfully' in r.message for r in caplog.records), (
+        'a failed legacy decrypt must not log a success warning'
+    )
+
+
 def test_legacy_cbc_wrong_key_raises():
     with pytest.raises(ValueError, match='Decryption failed'):
         AESCipher('not-the-key').decrypt(TEST_CBC_CIPHERTEXT)

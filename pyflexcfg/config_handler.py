@@ -109,9 +109,10 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             project_root: Optional explicit project root used by the
                 `!proj_root` YAML constructor. When omitted, the value is
                 resolved via :meth:`HandlerMeta.resolve_project_root` (env vars).
-            reset: When True (default), drop existing `AttrDict`-valued class
-                attributes before loading. When False, loaded top-level keys
-                overlay existing ones without removing siblings.
+            reset: When True (default), drop every existing config value
+                before loading, whatever its type or origin (files, env layer,
+                env-var overrides, runtime assignment). When False, loaded
+                top-level keys overlay existing ones without removing siblings.
         """
         path = Path(config_path) if config_path is not None else cls.config_root
 
@@ -130,7 +131,7 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         YamlLoader.project_root = cls.project_root
 
         if reset:
-            for key in [k for k, v in list(cls.__dict__.items()) if isinstance(v, AttrDict)]:
+            for key in cls._config_keys():
                 delattr(cls, key)
 
         loaded = AttrDict()
@@ -201,10 +202,8 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                 :class:`Required` sentinel.
         """
         missing: list[str] = []
-        for key, value in cls.__dict__.items():
-            if key.startswith('_') or callable(getattr(cls, key, None)):
-                continue
-            _collect_required(value, key, missing)
+        for key in cls._config_keys():
+            _collect_required(cls.__dict__[key], key, missing)
         if missing:
             raise RuntimeError(f'Required config values are missing: {missing}')
 
