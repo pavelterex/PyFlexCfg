@@ -79,8 +79,9 @@ YAML files  <  active PYFLEX_ENV layer  <  CFG__* set by the process  <  CFG__* 
 The single `.env` file in the config root is loaded first and **overrides the process environment**
 for the variables it defines (`CFG__*`, `PYFLEX_ENV`, …); the values are written into `os.environ`.
 Any file whose name ends in `.env` counts, the bare `.env` included. On `reload_config()` a variable
-no longer in the file (or a deleted file) is removed from `os.environ` again, unless the process
-changed that variable in the meantime.
+no longer in the file (or a deleted file) is put back to what the process itself provided, or
+removed from `os.environ` if the process never set it, unless the process changed that variable in
+the meantime.
 
 **At most one `.env` file may exist in the config root.** Two or more raise `RuntimeError` naming
 them, on first load, on `reload_config()` and in every `pyflexcfg` command; nothing is read into the
@@ -90,8 +91,9 @@ environment. Never suggest splitting settings across several `.env` files, and f
 **Exception to file-wins — `PYFLEX_CFG_KEY`, `VAULT_ADDR`, `VAULT_TOKEN`:** if the process provides
 one and the `.env` file gives it a *different* value, loading (and `pyflexcfg encrypt`) raises
 `RuntimeError` naming the variable and file, and applies nothing from the file. Same value in both
-places is fine; the file may supply one the process lacks; a value that originally came from the
-`.env` file may be rotated there and picked up by `reload_config()`.
+places is fine, and the variable stays the process's: removing it from the file keeps it, changing
+it in the file later is refused. The file may supply one the process lacks; a value that originally
+came from the `.env` file may be rotated there and picked up by `reload_config()`.
 
 For other variables PyFlexCfg does not detect conflicts: define each variable in one place.
 

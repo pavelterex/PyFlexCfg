@@ -120,10 +120,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key still wins, and two keys differing only in case with no exact match raise `RuntimeError`.
   Keys that cannot be spelled in a variable name (`my-key`, names containing `__`, non-strings)
   remain unaddressable; use `::yaml_m` on the parent.
-- **`reload_config()` keeps the environment in step with the `.env` file.** A variable removed from
-  the file, or every variable when the file is deleted, is now removed from `os.environ` on the next
-  reload, so a dropped `CFG__*` override or Vault credential stops applying. A variable the process
-  changed after PyFlexCfg set it is left alone.
+- **`reload_config()` keeps the environment in step with the `.env` file.** When a variable is
+  removed from the file, or the file is deleted, the next reload puts the variable back to what the
+  process itself provided, or removes it from `os.environ` if the process never set it. A dropped
+  `CFG__*` override or Vault credential stops applying, and a process-provided variable the file
+  merely repeated is kept. A variable the process changed after PyFlexCfg set it is left alone.
 - **`Cfg.reload_config(reset=True)` now drops every config value before loading**, not only
   mapping-valued ones. Top-level scalars and lists set by the env layer, a `CFG__*` override or
   runtime assignment no longer survive a reload after their source is gone. `reset=False` is

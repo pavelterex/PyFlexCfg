@@ -284,6 +284,50 @@ class TestTmpPath:
 
         assert os.environ['ENV_STALE_PROBE'] == 'set-by-the-application', 'a value the process set itself was removed'
 
+    def test_env_file_removed_override_restores_process_value(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv('ENV_RESTORE_PROBE', 'from-process')
+        env_file = tmp_path / 'app.env'
+        env_file.write_text('ENV_RESTORE_PROBE=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+        assert os.environ['ENV_RESTORE_PROBE'] == 'from-file', 'the file must override the process value first'
+
+        env_file.unlink()
+        Cfg.reload_config()
+
+        assert os.environ.get('ENV_RESTORE_PROBE') == 'from-process', 'the process value must come back'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN'])
+    def test_env_file_same_value_credential_cannot_change_in_file_later(self, tmp_path: Path, monkeypatch, name):
+        monkeypatch.setenv(name, 'process-value')
+        env_file = tmp_path / 'app.env'
+        env_file.write_text(f'{name}=process-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+
+        env_file.write_text(f'{name}=changed-in-file\n')
+
+        with pytest.raises(RuntimeError, match=name):
+            Cfg.reload_config()
+        assert os.environ[name] == 'process-value', 'a process-provided credential must not be replaced by the file'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN', 'ENV_SAME_VALUE_PROBE'])
+    @pytest.mark.parametrize('change', ['variable removed', 'file deleted'])
+    def test_env_file_same_value_variable_survives_removal_from_file(self, tmp_path: Path, monkeypatch, change, name):
+        monkeypatch.setenv(name, 'same-value')
+        env_file = tmp_path / 'app.env'
+        env_file.write_text(f'{name}=same-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+
+        if change == 'file deleted':
+            env_file.unlink()
+        else:
+            env_file.write_text('')
+        Cfg.reload_config()
+
+        assert os.environ.get(name) == 'same-value', f'the process-provided {name} was removed with the file entry'
+
     def test_env_file_selects_env_layer(self, tmp_path: Path, monkeypatch):
         monkeypatch.delenv('PYFLEX_ENV', raising=False)
         (tmp_path / 'settings.env').write_text('PYFLEX_ENV=dev\n')

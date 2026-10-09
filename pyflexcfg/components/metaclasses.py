@@ -32,6 +32,8 @@ _SHADOWED_KEYS = frozenset(dir(AttrDict))
 
 # Values this module wrote into the environment from `.env` files, by normalised variable name.
 _env_file_values: dict[str, str] = {}
+# What the process provided for each of those variables before the write; `None` if it was unset.
+_env_originals: dict[str, str | None] = {}
 
 
 class HandlerMeta(type):
@@ -158,13 +160,16 @@ class HandlerMeta(type):
         current = {_env_name(name) for name, value in values.items() if value is not None}
         for name, written in list(_env_file_values.items()):
             if name not in current:
-                # Only a value still exactly as written here is this module's to remove.
+                # Only a value still exactly as written here is this module's to undo.
                 if os.environ.get(name) == written:
-                    del os.environ[name]
+                    _restore(name, _env_originals.get(name))
                 del _env_file_values[name]
+                _env_originals.pop(name, None)
 
         for name, value in values.items():
             if value is not None:
+                # Read what the process provides before overwriting it, so it can be put back later.
+                _env_originals[_env_name(name)] = _process_value(name)
                 os.environ[name] = value
                 _env_file_values[_env_name(name)] = value
 
@@ -265,12 +270,11 @@ def _child_path(path: str, key: Any) -> str:
 
 def _contradicts_process(name: str, file_value: str | None) -> bool:
     """Tell whether a `.env` value for a protected variable differs from one the process provides."""
-    current = os.environ.get(name)
-    if _env_name(name) not in _PROTECTED_ENV_VARS or file_value is None or current is None:
+    provided = _process_value(name)
+    if _env_name(name) not in _PROTECTED_ENV_VARS or file_value is None or provided is None:
         return False
 
-    # A value this module wrote from an earlier `.env` load is the file's own and may change.
-    return current != file_value and _env_file_values.get(_env_name(name)) != current
+    return provided != file_value
 
 
 def _env_name(name: str) -> str:
@@ -281,6 +285,30 @@ def _env_name(name: str) -> str:
 def _is_env_file(item: Path) -> bool:
     """Tell whether `item` is a dotenv file. By name ending, since `Path('.env').suffix` is empty."""
     return item.is_file() and item.name.endswith('.env')
+
+
+def _process_value(name: str) -> str | None:
+    """
+    Return what the process itself provides for variable `name`, or `None` if nothing.
+
+    While the environment still holds a value this module wrote from a `.env` file, that is the
+    value the variable had before the write; otherwise it is the current value.
+    """
+    key = _env_name(name)
+    current = os.environ.get(name)
+
+    if key in _env_file_values and current == _env_file_values[key]:
+        return _env_originals.get(key)
+
+    return current
+
+
+def _restore(name: str, original: str | None) -> None:
+    """Put variable `name` back to `original`, removing it when there was none."""
+    if original is None:
+        del os.environ[name]
+    else:
+        os.environ[name] = original
 
 
 def _unreachable_entries(value: Any, path: str, *, top_level: bool = False) -> Iterator[str]:

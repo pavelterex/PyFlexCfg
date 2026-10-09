@@ -179,10 +179,12 @@ The file is not parsed as YAML and not exposed as a `Cfg.<name>` attribute. It m
 ending in `.env`: the conventional bare `.env`, or `app.env`, `secrets.env` and so on.
 
 The file is re-read on every `Cfg.reload_config()`, and PyFlexCfg keeps the environment in step with
-it. A variable you remove from the file, or all of them if you delete the file, is removed from the
-environment again on the next reload, so a dropped `CFG__*` override or credential stops applying.
-The one exception is a variable your own code has changed since PyFlexCfg set it: that value is
-yours and is left alone.
+it. When you remove a variable from the file, or delete the file, the next reload undoes what the
+file had done: the variable goes back to the value the process itself provided, or disappears if
+the process never set it. A dropped `CFG__*` override or credential therefore stops applying, and a
+variable the process provided is never lost because a file happened to repeat it. The one exception
+is a variable your own code has changed since PyFlexCfg set it: that value is yours and is left
+alone.
 
 > **Only one `.env` file is allowed in the config root.**
 >
@@ -250,6 +252,10 @@ the one your process uses. The rule in full:
 A value that came from a `.env` file in the first place may change in the file later:
 `Cfg.reload_config()` picks up a rotated `VAULT_TOKEN` without complaint. The error is only about a
 file contradicting something the process itself provides.
+
+A credential set in both places with the same value still belongs to the process. Removing it from
+the file later leaves the process value in place, and changing it in the file later is refused like
+any other contradiction.
 
 For all other variables PyFlexCfg does not detect or resolve a conflict; the file simply wins.
 Keeping the sources consistent is up to you:
