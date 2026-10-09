@@ -236,7 +236,7 @@ Cfg.validate_required()  # raises if any Required() sentinels remain
 
 | Tag | Returns | Description |
 |---|---|---|
-| `!string` | `str` | Join sequence parts as one string. |
+| `!string` | `str` / `Secret` | Join sequence parts as one string; a `Secret` if any part is one. |
 | `!encr` | `Secret` | Decrypt a base64 secret using `PYFLEX_CFG_KEY` (AES-GCM v1). |
 | `!encr_kdf` | `Secret` | Same but PBKDF2 KDF — slower, higher brute-force resistance. |
 | `!required` | `Required` | Raises at startup unless replaced by an override. |
@@ -316,6 +316,45 @@ from pyflexcfg import AESCipher, Secret
 
 PyFlexCfg requires `PYFLEX_CFG_KEY` only when at least one `!encr` / `!encr_kdf` value is present.
 A key shorter than 32 characters emits a `WARNING`.
+
+### Composing a string that contains a secret
+
+A connection string or an auth header usually needs a secret in the middle of other text. Build it
+in YAML with `!string`: the parts may include `!encr`, `!encr_kdf` or `!vault` values.
+
+```yaml
+# config/db.yaml
+url: !string ['postgresql://app:', !encr UEZMWA..., '@db.example.com:', 5432, '/main']
+auth_header: !string ['Bearer ', !vault secret/data/myapp/api#token]
+```
+
+```python
+from pyflexcfg import Cfg
+
+print(Cfg.db.url)                  # ********
+connect(Cfg.db.url)                # receives postgresql://app:hunter2@db.example.com:5432/main
+```
+
+When any part is a secret, the whole result is a `Secret`: it holds the real, fully composed value
+and is masked wherever it is displayed. With no secret part, `!string` returns a plain `str`.
+
+If you compose in code instead, **do not use an f-string, `format()` or `%`** — formatting a
+`Secret` yields its mask. Concatenate or join, and wrap the result if you want it to stay masked:
+
+```python
+password = Cfg.db.password         # a Secret holding 'hunter2'
+
+f'postgresql://app:{password}@db'                  # 'postgresql://app:********@db'  — broken
+'postgresql://app:' + password + '@db'             # 'postgresql://app:hunter2@db'   — plain str
+''.join(['postgresql://app:', password, '@db'])    # 'postgresql://app:hunter2@db'   — plain str
+Secret('postgresql://app:' + password + '@db')     # same value, masked again
+```
+
+The same applies to any code you hand a `Secret` to: a library that formats or calls `str()` on it
+receives the mask, not the value.
+
+Path tags are the exception: `!path` and the other path constructors return ordinary path objects,
+which cannot be masked. Do not put a secret in a path.
 
 ### Migrating `!encr` from v2
 
@@ -413,19 +452,30 @@ pyflexcfg env
 # Encrypt plaintext !encr / !encr_kdf values and migrate legacy v2 ciphertexts, in-place
 pyflexcfg encrypt
 
-# Report plaintext and legacy values without writing; exit 1 if any plaintext is found (pre-commit hook)
+# Report without writing; exit 1 on plaintext or on a non-PBKDF2 value under !encr_kdf (pre-commit hook)
 pyflexcfg encrypt --dry-run
 ```
 
-All commands read `PYFLEX_CFG_ROOT_PATH` and `PYFLEX_CFG_KEY` from the environment. `encrypt` exits 1
+All commands read `PYFLEX_CFG_ROOT_PATH` and `PYFLEX_CFG_KEY` from the environment. Every command,
+`encrypt` included, first loads the `*.env` files in the config root, so a `PYFLEX_CFG_KEY` kept
+there is picked up; as in normal loading, a value from a `.env` file replaces one already set in
+the environment. `encrypt` exits 1
 with an error if the config root is missing, is not a directory, or contains no `.yaml` / `.yml`
-files, so a misconfigured pre-commit hook fails instead of passing silently.
+files, so a misconfigured pre-commit hook fails instead of passing silently. It also rejects any
+argument other than `--dry-run` before touching a file, so a mistyped flag such as `--dryrun` cannot
+turn a check into a write.
 
 `pyflexcfg encrypt` reads each file with a YAML tokenizer, so it acts only on real `!encr` /
 `!encr_kdf` tags. Text that merely mentions `!encr` — inside a string or a comment — is never
 touched, and the rest of the file (comments, layout, line endings) is preserved byte for byte.
 Plain, quoted and flow-style values are all handled; a quoted value is written back unquoted,
 since ciphertext needs no quoting.
+
+The command also checks that a ciphertext matches its tag. Both tags decrypt either kind of
+ciphertext at load time, so a value produced by `encrypt()` and pasted under `!encr_kdf` would load
+fine while lacking the PBKDF2 protection the tag stands for. `pyflexcfg encrypt` re-encrypts such a
+value with PBKDF2, and `--dry-run` reports it and exits 1. The reverse — a PBKDF2 ciphertext under
+`!encr` — is stronger than required and is left alone.
 
 What it will not rewrite: a block scalar (`|` or `>`), a value carrying an anchor or alias, a tag
 with no value, a legacy-looking value it cannot decrypt, and any file the tokenizer rejects. Each is
@@ -462,8 +512,22 @@ import logging
 logging.getLogger('pyflexcfg').setLevel(logging.DEBUG)
 ```
 
-Secret values are **never** included in log output — the library masks them in all debug, warning,
-and error messages.
+PyFlexCfg keeps secret values out of its own log messages and out of the errors it raises for
+encryption, decryption and env-var overrides. A failed override conversion, for instance, names the
+variable and the target type but not the value:
+`CFG__DB__PASSWORD: value could not be cast as 'int' (ValueError)`.
+
+A YAML syntax error in a config file is reported with the file path, line and column only; the
+offending line itself is not quoted.
+
+Two limits to keep in mind:
+
+- `str(Cfg)` and `pyflexcfg show` mask only `Secret` values, so anything you want hidden there must
+  be a `Secret` (`!encr`, `!encr_kdf`, `!vault` or the `::Secret` suffix).
+- A `Secret` masks how it is *displayed* — `repr`, `str`, every kind of string formatting, and
+  PyFlexCfg's own YAML output. It is still a `str`, so code that serialises or combines it gets the
+  real value: `json.dumps`, `yaml.dump` with PyYAML's default dumper, `','.join(...)`, slicing and
+  concatenation. Treat those results as sensitive.
 
 ---
 

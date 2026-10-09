@@ -61,7 +61,10 @@ class YamlLoader(Loader):
             return Required()
 
         def string(loader: Loader, node: SequenceNode) -> str:
-            return ''.join(str(i) for i in loader.construct_sequence(node))
+            # str() of a Secret is its mask, so str parts are joined as they are to keep the real value.
+            parts = [part if isinstance(part, str) else str(part) for part in loader.construct_sequence(node)]
+            joined = ''.join(parts)
+            return Secret(joined) if any(isinstance(part, Secret) for part in parts) else joined
 
         def vault(loader: Loader, node: ScalarNode) -> Any:
             from .providers import get_vault_provider

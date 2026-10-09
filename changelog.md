@@ -19,8 +19,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   salt) for crown-jewel secrets. `AESCipher.encrypt_kdf(plaintext)` produces the ciphertext.
   `AESCipher.decrypt()` is self-routing: it reads the version byte after the `PFLX` marker (`\x01`
   for fast, `\x02` for KDF) so both tags share the same decrypt path.
-- **`AESCipher.is_encrypted()`, `AESCipher.is_legacy()`, `AESCipher.decrypt_legacy()`** — classify
-  a value as current-format or v2-shaped, and decrypt a v2 AES-CBC ciphertext explicitly.
+- **`AESCipher.is_encrypted()`, `AESCipher.is_kdf()`, `AESCipher.is_legacy()`,
+  `AESCipher.decrypt_legacy()`** — classify a value as current-format, PBKDF2-encrypted or
+  v2-shaped, and decrypt a v2 AES-CBC ciphertext explicitly.
 - **`PYFLEX_ENV` environment layering.** Set `PYFLEX_ENV=dev` to deep-merge `Cfg.env.dev` into the
   root `Cfg` namespace after YAML loading. Layering order (lowest → highest): base YAML →
   env-layer merge → `CFG__*` env-var overrides → `validate_required()`.
@@ -42,6 +43,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     values that do not decrypt with the current key) are left untouched, reported on stderr, and
     make the command exit 1. Reports name the file, line, tag and key — never the value. A missing
     or non-directory config root, or one with no YAML files, is an error (exit 1), not an empty scan.
+    A fast ciphertext under `!encr_kdf` is re-encrypted with PBKDF2 (and fails `--dry-run`); a
+    PBKDF2 ciphertext under `!encr` is left alone.
+    Any argument other than `--dry-run` is rejected before a file is touched. The config root's
+    `*.env` files are loaded first, so `PYFLEX_CFG_KEY` may live there.
 - **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
   (`hvac` dependency). Path format: `mount/path#field` — the `#field` suffix selects a key from
   the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
@@ -63,6 +68,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `import pyflexcfg` to fail fast must reference `pyflexcfg.Cfg`. The first load is guarded by a
   lock, so threads requesting `Cfg` simultaneously load it once; `reload_config()` and runtime
   mutation remain unsynchronised.
+- **`!string` composes secrets correctly.** A part tagged `!encr`, `!encr_kdf` or `!vault` used to be
+  joined as its mask, producing e.g. `'postgresql://app:********@db'`. The real value is now joined
+  in and the result is a `Secret`, so `!string ['postgresql://app:', !encr …, '@db']` yields a usable,
+  masked connection string. `!string` with no secret part still returns a plain `str`.
 - **`Cfg.reload_config(reset=True)` now drops every config value before loading**, not only
   mapping-valued ones. Top-level scalars and lists set by the env layer, a `CFG__*` override or
   runtime assignment no longer survive a reload after their source is gone. `reset=False` is
@@ -73,6 +82,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **AES-CBC replaced with AES-GCM.** GCM provides authenticated encryption — any ciphertext
   tampering raises `ValueError` at decrypt time rather than silently producing corrupted plaintext.
   The old CBC implementation had no authentication tag.
+- **Failed `::Type` conversions no longer expose the value.** `update_from_env()` used to raise
+  `Value 'hunter2' could not be cast …` with the original exception chained. The error now names
+  the variable and target type only, e.g. `CFG__DB__PASSWORD: value could not be cast as 'int'
+  (ValueError)`, and the underlying exception is not chained.
+- **Skipped-override debug log no longer prints a config value.** When a `CFG__*` path ran through
+  a scalar or list (`CFG__DB__PASSWORD__X=…`), the "cannot assign" debug message included that
+  value's `repr`. It now logs only the value's type.
 - **Debug log no longer leaks env-var values on unknown `::Type` suffix.** When `update_from_env()`
   encounters an unrecognised type suffix (e.g. `CFG__X=secret::nosuchtype`), the log message now
   records only the type name, never the value that preceded `::` — which could have been a secret.

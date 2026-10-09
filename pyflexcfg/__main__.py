@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from pyflexcfg.components.encryption import AESCipher
+from pyflexcfg.components.metaclasses import HandlerMeta
 
 _BLOCK_STYLES = ('|', '>')
 _ENCR_TAGS = {('!', 'encr'), ('!', 'encr_kdf')}
@@ -19,6 +20,7 @@ class _Report:
     legacy: list[str] = field(default_factory=list)
     plaintext: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
+    weak: list[str] = field(default_factory=list)
 
 
 def main() -> None:
@@ -35,8 +37,11 @@ def main() -> None:
         print(f'project_root: {Cfg.project_root}')
         print(f'PYFLEX_ENV  : {os.getenv("PYFLEX_ENV", "(not set)")}')
     elif cmd == 'encrypt':
-        dry_run = '--dry-run' in sys.argv[2:]
-        _cmd_encrypt(dry_run=dry_run)
+        args = sys.argv[2:]
+        if unknown := [arg for arg in args if arg != '--dry-run']:
+            print(f'Unknown encrypt argument(s): {unknown}. Usage: pyflexcfg encrypt [--dry-run]', file=sys.stderr)
+            sys.exit(1)
+        _cmd_encrypt(dry_run='--dry-run' in args)
     else:
         print(
             f'Unknown command: {cmd!r}. Available: show, env, encrypt [--dry-run]',
@@ -52,6 +57,7 @@ def _cmd_encrypt(*, dry_run: bool) -> None:
         print(f'Error: config root {config_root} is not a directory.', file=sys.stderr)
         sys.exit(1)
 
+    HandlerMeta.load_env_files(config_root)
     key = os.getenv(_KEY_ENV)
     if not key:
         print(f'Error: {_KEY_ENV} is not set.', file=sys.stderr)
@@ -84,12 +90,12 @@ def _cmd_encrypt(*, dry_run: bool) -> None:
 
     for msg in report.legacy:
         print(msg)
-    for msg in report.plaintext:
+    for msg in report.plaintext + report.weak:
         print(msg, file=sys.stderr if dry_run else sys.stdout)
     for msg in report.unresolved:
         print(f'Warning: {msg}', file=sys.stderr)
 
-    if report.unresolved or (dry_run and report.plaintext):
+    if report.unresolved or (dry_run and (report.plaintext or report.weak)):
         sys.exit(1)
     if dry_run and not report.legacy:
         print('All !encr / !encr_kdf values are already encrypted.')
@@ -131,25 +137,39 @@ def _find_edits(text: str, rel: str, cipher: AESCipher, report: _Report) -> list
             report.unresolved.append(f'{where} is not a plain or quoted scalar — encrypt manually')
             continue
 
-        value = following.value
-        if AESCipher.is_encrypted(value):
-            continue
-
-        plaintext = value
-        if AESCipher.is_legacy(value):
-            try:
-                plaintext = cipher.decrypt_legacy(value)
-            except ValueError:
-                # Either a legacy ciphertext under another key or base64-looking plaintext.
-                report.unresolved.append(f'{where} looks like a legacy ciphertext but does not decrypt with {_KEY_ENV}')
-                continue
-            report.legacy.append(f'{where} is a legacy AES-CBC ciphertext')
-        else:
-            report.plaintext.append(f'{where} is plaintext')
-
-        edits.append((token.start_mark.index, following.end_mark.index, tag, plaintext))
+        plaintext = _plaintext_to_encrypt(tag, following.value, where, cipher, report)
+        if plaintext is not None:
+            edits.append((token.start_mark.index, following.end_mark.index, tag, plaintext))
 
     return edits
+
+
+def _plaintext_to_encrypt(tag: str, value: str, where: str, cipher: AESCipher, report: _Report) -> str | None:
+    """Classify a tagged value; return its plaintext if it must be (re-)encrypted, else `None`."""
+    if AESCipher.is_encrypted(value):
+        # A KDF ciphertext under `!encr` is stronger than asked for and is left alone.
+        if tag != '!encr_kdf' or AESCipher.is_kdf(value):
+            return None
+        try:
+            plaintext = cipher.decrypt(value)
+        except ValueError:
+            report.unresolved.append(f'{where} is encrypted without PBKDF2 and does not decrypt with {_KEY_ENV}')
+            return None
+        report.weak.append(f'{where} is encrypted without the PBKDF2 its tag requires')
+        return plaintext
+
+    if not AESCipher.is_legacy(value):
+        report.plaintext.append(f'{where} is plaintext')
+        return value
+
+    try:
+        plaintext = cipher.decrypt_legacy(value)
+    except ValueError:
+        # Either a legacy ciphertext under another key or base64-looking plaintext.
+        report.unresolved.append(f'{where} looks like a legacy ciphertext but does not decrypt with {_KEY_ENV}')
+        return None
+    report.legacy.append(f'{where} is a legacy AES-CBC ciphertext')
+    return plaintext
 
 
 if __name__ == '__main__':

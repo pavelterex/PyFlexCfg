@@ -2,8 +2,9 @@
 
 PyFlexCfg is a YAML configuration loader for Python that needs no init call. It walks a directory
 of YAML files the first time `Cfg` is imported and exposes the combined tree as attribute-access
-namespaces on that single global class `Cfg` (not an instance). It supports encrypted secrets, environment-variable overrides, env-specific
-config layering, required-key validation, a CLI, and optional HashiCorp Vault integration.
+namespaces on that single global class `Cfg` (not an instance). It supports encrypted secrets,
+environment-variable overrides, env-specific config layering, required-key validation, a CLI, and
+optional HashiCorp Vault integration.
 
 ---
 
@@ -22,6 +23,7 @@ config layering, required-key validation, a CLI, and optional HashiCorp Vault in
 | `AESCipher.decrypt(ciphertext)` | method | Routes by `PFLX` marker + version byte; no marker → v2 AES-CBC |
 | `AESCipher.decrypt_legacy(ciphertext)` | method | Decrypt a v2 AES-CBC ciphertext; no migration warning |
 | `AESCipher.is_encrypted(value)` | staticmethod | `True` for a current-format ciphertext (base64 starts `UEZMWA`) |
+| `AESCipher.is_kdf(value)` | staticmethod | `True` for a current-format ciphertext made by `encrypt_kdf()` |
 | `AESCipher.is_legacy(value)` | staticmethod | `True` for a value shaped like a v2 AES-CBC ciphertext |
 | `AttrDict` | class | `dict` subclass exposing keys as attributes |
 | `Required` | class | Sentinel for `!required` tag; importable for programmatic injection/testing |
@@ -52,7 +54,7 @@ config layering, required-key validation, a CLI, and optional HashiCorp Vault in
 | `!required` | scalar | `Required` | Raises when `Cfg` loads if not satisfied by an override |
 | `!vault <path>#<field>` | scalar | `Secret` | Fetches from HashiCorp Vault; needs `hvac` installed |
 | `!vault <path>` | scalar | `AttrDict` | Whole secret; every leaf is a `Secret` |
-| `!string [a, b, c]` | sequence | `str` | Joins parts: `"abc"` |
+| `!string [a, b, c]` | sequence | `str` / `Secret` | Joins parts: `"abc"`; a `Secret` if any part is one |
 | `!path [a, b]` | sequence | `Path` | `Path(a, b)` (host-native) |
 | `!path_win [a, b]` | sequence | `PureWindowsPath` | |
 | `!path_posix [a, b]` | sequence | `PurePosixPath` | |
@@ -101,12 +103,21 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
   value, unparsable files, and legacy-shaped values that do not decrypt with the current key (wrong
   key, or plaintext that is itself base64 of 32/48/64… bytes). These are reported on stderr and the
   command exits 1; encrypt them manually with `AESCipher.encrypt()`.
+- **The tag does not enforce the ciphertext kind at load time.** `!encr` and `!encr_kdf` both decrypt
+  either kind. Put an `encrypt_kdf()` ciphertext under `!encr_kdf`; `pyflexcfg encrypt` upgrades a
+  fast ciphertext found there and `--dry-run` exits 1 on it. A KDF ciphertext under `!encr` is left
+  alone.
 - **`Cfg.reload_config()` with the default `reset=True` drops every config value first**, including
   ones set by the env layer, `CFG__*` overrides or runtime assignment. `reset=False` keeps anything
   the new load does not overwrite.
 - **Every `!vault` leaf is a `Secret` holding text.** A Vault number or boolean arrives as
   `Secret('5432')` / `Secret('True')`; convert with `int(...)` or compare to `'True'` — `bool()` on it
   is always truthy. `null` stays `None`.
+- **Compose secret-bearing strings with `!string`, never with formatting.** In YAML,
+  `url: !string ['postgresql://app:', !encr <ciphertext>, '@db:5432/main']` yields a `Secret` holding
+  the full real value (`!vault` parts work too). In code, `f'{secret}'`, `'{}'.format(secret)` and
+  `'%s' % secret` all insert `********`; use `'prefix' + secret + 'suffix'` or `''.join([...])`, and
+  wrap the result in `Secret(...)` to keep it masked. Path tags (`!path` etc.) cannot mask a secret.
 - **Ciphertext format is `PFLX` + version byte + payload.** Never detect encryption by the first
   byte alone; use `AESCipher.is_encrypted()`.
 

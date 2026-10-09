@@ -107,6 +107,16 @@ def test_vault_kv2_splits_mount_from_path(vault_env, mock_hvac):
     read_version.assert_called_once_with(path='myapp/db', mount_point='secret')
 
 
+def test_vault_missing_field_error_omits_secret_values(vault_env, mock_hvac):
+    mock_hvac.Client.return_value.secrets.kv.v1.read_secret.return_value = {'data': {'password': 'hunter2'}}
+
+    with pytest.raises(RuntimeError, match='not found') as exc_info:
+        yaml.load('val: !vault secret/myapp#nosuchfield\n', YamlLoader)
+
+    assert 'hunter2' not in str(exc_info.value), 'a sibling field value leaked into the missing-field error'
+    assert 'password' not in str(exc_info.value), 'sibling field names must not be listed either'
+
+
 def test_vault_missing_vault_addr_raises(monkeypatch, mock_hvac):
     monkeypatch.delenv('VAULT_ADDR', raising=False)
     monkeypatch.setenv('VAULT_TOKEN', 'tok')
@@ -147,6 +157,15 @@ def test_vault_returns_secret_instance(vault_env, mock_hvac):
     data = yaml.load('val: !vault secret/myapp#key\n', YamlLoader)
     assert isinstance(data['val'], Secret)
     assert repr(data['val']) == '********'
+
+
+def test_vault_tag_composes_inside_string_tag(vault_env, mock_hvac):
+    mock_hvac.Client.return_value.secrets.kv.v1.read_secret.return_value = {'data': {'token': 'tok-123'}}
+
+    header = yaml.load("header: !string ['Bearer ', !vault secret/myapp#token]", YamlLoader)['header']
+
+    assert isinstance(header, Secret), f'a string built from a Vault value must be a Secret, got {type(header)}'
+    assert header == 'Bearer tok-123', 'the real Vault value must be composed in'
 
 
 def test_vault_tag_field_holding_dict_masks_leaves(vault_env, mock_hvac):

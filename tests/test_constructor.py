@@ -2,7 +2,10 @@ from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 import yaml
+from conftest import TEST_ENCRYPTED_STRING, TEST_STRING
 
+from pyflexcfg.components.misc import Secret
+from pyflexcfg.components.yaml_dumper import YamlDumper
 from pyflexcfg.components.yaml_loader import YamlLoader
 
 TEST_DATA_DIR = Path(__file__).parent / 'test_data'
@@ -56,3 +59,19 @@ class TestConstructors:
 
     def test_construct_string(self, constructor_config):
         assert constructor_config['string'] == 'This is a test string'
+
+    def test_construct_string_with_encrypted_part(self):
+        text = f"dsn: !string ['postgres://app:', !encr {TEST_ENCRYPTED_STRING}, '@db.example.com:', 5432, '/main']"
+        data = yaml.load(text, YamlLoader)
+        dsn = data['dsn']
+
+        assert isinstance(dsn, Secret), f'a string built from a secret must be a Secret, got {type(dsn).__name__}'
+        assert dsn == f'postgres://app:{TEST_STRING}@db.example.com:5432/main', 'the real secret must be composed in'
+        assert repr(dsn) == '********', 'the composed string must be masked'
+        assert TEST_STRING not in yaml.dump(data, Dumper=YamlDumper), 'the secret leaked into the YAML dump'
+
+    def test_construct_string_without_secret_stays_plain_str(self):
+        result = yaml.load("url: !string ['http://', host, ':', 8080]", YamlLoader)['url']
+
+        assert type(result) is str, f'a string with no secret part must stay a plain str, got {type(result).__name__}'
+        assert result == 'http://host:8080', f'got {result!r}'

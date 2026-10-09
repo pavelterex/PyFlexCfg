@@ -130,6 +130,13 @@ def test_is_encrypted_recognizes_only_current_format(cipher):
     assert not AESCipher.is_encrypted('plain-text!'), 'non-base64 text is not a ciphertext'
 
 
+def test_is_kdf_recognizes_only_kdf_ciphertext(cipher):
+    assert AESCipher.is_kdf(cipher.encrypt_kdf(TEST_STRING)), 'KDF ciphertext must be recognized'
+    assert not AESCipher.is_kdf(cipher.encrypt(TEST_STRING)), 'fast ciphertext is not KDF-encrypted'
+    assert not AESCipher.is_kdf(TEST_CBC_CIPHERTEXT), 'legacy ciphertext is not KDF-encrypted'
+    assert not AESCipher.is_kdf('plain-text!'), 'non-base64 text is not a ciphertext'
+
+
 def test_is_legacy_recognizes_only_cbc_shape(cipher):
     assert AESCipher.is_legacy(TEST_CBC_CIPHERTEXT), 'v2 ciphertext must be recognized'
     assert not AESCipher.is_legacy(cipher.encrypt('abc')), 'a 48-byte current-format ciphertext is not legacy'

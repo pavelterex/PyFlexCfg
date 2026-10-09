@@ -16,7 +16,7 @@ from .yaml_loader import YamlLoader
 
 _NAME_RE = re.compile(NAME_REGEX_STRING)
 # Class attributes `reload_config` assigns that are not config values.
-_RESERVED_ATTRS = {'config_root', 'project_root'}
+_RESERVED_ATTRS = frozenset({'config_root', 'project_root'})
 
 
 class HandlerMeta(type):
@@ -35,6 +35,7 @@ class HandlerMeta(type):
 
     def __new__(cls, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> HandlerMeta:
         init_attrs = AttrDict(namespace)
+        init_attrs['_handler_attrs'] = frozenset(namespace) | _RESERVED_ATTRS
 
         if not cls.config_root.exists():
             raise RuntimeError(f'Configuration root path {cls.config_root} is not found!')
@@ -147,11 +148,7 @@ class HandlerMeta(type):
 
     def _config_keys(cls) -> list[str]:
         """Names of the class attributes that hold config values, not handler machinery."""
-        return [
-            key
-            for key in cls.__dict__
-            if not key.startswith('_') and key not in _RESERVED_ATTRS and not callable(getattr(cls, key))
-        ]
+        return [key for key in cls.__dict__ if not key.startswith('_') and key not in cls._handler_attrs]
 
     @classmethod
     def _load_yaml_from_file(cls, dct: AttrDict, file: Path) -> None:
@@ -162,6 +159,7 @@ class HandlerMeta(type):
         if file.stem in dct:
             raise RuntimeError(f'Namespace conflict: "{file.stem}" is already defined')
 
+        # Pass the open file, not its text: PyYAML quotes the offending line in errors only for str input.
         with file.open() as cfg_file:
             data = cls.to_attrdict(yaml.load(cfg_file, YamlLoader))
 

@@ -108,6 +108,14 @@ class TestHandler:
 
         assert Cfg.app.general.var_int == 500, f'reload should restore loaded value, got {Cfg.app.general.var_int!r}'
 
+    def test_reload_drops_callable_runtime_value(self):
+        Cfg.callback = lambda: None
+        Cfg.reload_config()
+
+        assert not hasattr(Cfg, 'callback'), 'a callable runtime value must be dropped like any other config value'
+        assert callable(Cfg.reload_config), 'handler methods must survive a reload'
+        assert Cfg.config_root.is_dir(), 'handler attributes must survive a reload'
+
     def test_simple_config(self):
         data = Cfg.app.general
 
@@ -119,6 +127,17 @@ class TestHandler:
         assume(data.var_bool_true is True)
         assume(data.var_bool_false is False)
         assume(data.var_null is None)
+
+    def test_str_includes_callable_runtime_value(self):
+        Cfg.callback = lambda: None
+        try:
+            dumped = str(Cfg)
+        finally:
+            del Cfg.callback
+
+        assert 'callback:' in dumped, f'a callable config value must be rendered, got {dumped!r}'
+        for handler_method in ('reload_config', 'update_from_env', 'validate_required'):
+            assert handler_method not in dumped, f'{handler_method!r} is handler machinery but was rendered'
 
     def test_str_lists_only_config_after_reload(self):
         Cfg.reload_config()

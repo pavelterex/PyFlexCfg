@@ -163,7 +163,10 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             if not keys or not all(keys):
                 continue
 
-            converted, merge = cls._convert_value_type(var_value)
+            try:
+                converted, merge = cls._convert_value_type(var_value)
+            except ValueError as exc:
+                raise RuntimeError(f'{var_name}: {exc}') from None
 
             container: Any = cls
             for key in keys[:-1]:
@@ -187,7 +190,9 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                 try:
                     setattr(container, leaf, value)
                 except (AttributeError, TypeError) as exc:
-                    logger.debug('Skipping override %s: cannot assign on %r (%s)', var_name, container, exc)
+                    # Only the container's type is logged: its repr would print a config value.
+                    kind = type(container).__name__
+                    logger.debug('Skipping override %s: cannot assign on a %s value (%s)', var_name, kind, exc)
 
     @classmethod
     def validate_required(cls) -> None:
@@ -225,6 +230,10 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             A `(value, merge)` tuple. `merge` is True only for `::yaml_m`;
             it is the caller's signal to merge a dict-typed value into an
             existing dict rather than replace it.
+
+        Raises:
+            ValueError: The value cannot be cast to the type its suffix names.
+                The message never contains the value.
         """
         separator = '::'
 
@@ -236,7 +245,8 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                 try:
                     return _TYPE_CASTERS[value_type](value), value_type in _MERGE_SUFFIXES
                 except (ValueError, yaml.YAMLError) as exc:
-                    raise RuntimeError(f'Value {value!r} could not be cast as {value_type!r}: {exc}') from exc
+                    # The value may be a secret: keep it, and the cause that quotes it, out of the error.
+                    raise ValueError(f'value could not be cast as {value_type!r} ({type(exc).__name__})') from None
 
             logger.debug('Unknown type suffix %r; falling back to auto-conversion', value_type)
             src_value = value

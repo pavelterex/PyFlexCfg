@@ -39,6 +39,16 @@ def test_encrypt_dry_run_finds_plaintext(tmp_path):
     assert 'plaintext' in result.stderr.lower() or 'plaintext' in result.stdout.lower()
 
 
+def test_encrypt_dry_run_flags_fast_ciphertext_under_kdf_tag(tmp_path):
+    original = f'secret: !encr_kdf {TEST_ENCRYPTED_STRING}\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', '--dry-run', config_root=tmp_path)
+
+    assert result.returncode == 1, f'a value without the PBKDF2 its tag promises must fail the check: {result.stdout!r}'
+    assert 'PBKDF2' in result.stderr, f'got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'dry run must not write'
+
+
 def test_encrypt_dry_run_reports_legacy_without_writing(tmp_path):
     original = f'secret: !encr {TEST_CBC_CIPHERTEXT}\n'
     (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
@@ -67,6 +77,16 @@ def test_encrypt_dry_run_unsupported_scalar_exits_nonzero(tmp_path, value):
     assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must stay untouched'
 
 
+def test_encrypt_fast_ciphertext_under_kdf_tag_wrong_key_left_untouched(tmp_path):
+    original = f'secret: !encr_kdf {TEST_ENCRYPTED_STRING}\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path, cfg_key='not-the-key')
+
+    assert result.returncode == 1, 'a value that cannot be re-encrypted must fail the run'
+    assert 'does not decrypt' in result.stderr, f'got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must stay untouched'
+
+
 def test_encrypt_flow_style_value_encrypted(tmp_path):
     (tmp_path / 'app.yaml').write_text('creds: {user: admin, password: !encr hunter2}\n', encoding='utf-8')
     result = _run('encrypt', config_root=tmp_path)
@@ -91,6 +111,17 @@ def test_encrypt_ignores_tag_text_outside_tag_position(tmp_path):
     assert result.returncode == 0, f'got {result.stderr!r}'
     assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'non-tag text must not be rewritten'
     assert dry_run.returncode == 0, 'text that merely mentions !encr is not a plaintext secret'
+
+
+def test_encrypt_keeps_kdf_ciphertext_under_fast_tag(tmp_path):
+    original = f'secret: !encr {AESCipher(TEST_KEY).encrypt_kdf(TEST_STRING)}\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path)
+    dry_run = _run('encrypt', '--dry-run', config_root=tmp_path)
+
+    assert result.returncode == 0, f'got {result.stderr!r}'
+    assert dry_run.returncode == 0, 'a value stronger than its tag requires is not a problem'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'stronger ciphertext must not be downgraded'
 
 
 def test_encrypt_legacy_wrong_key_left_untouched(tmp_path):
@@ -179,6 +210,16 @@ def test_encrypt_quoted_value_round_trips(tmp_path):
     assert loaded['other'] == 1, 'following key must survive'
 
 
+def test_encrypt_reads_key_from_env_file(tmp_path):
+    (tmp_path / 'secrets.env').write_text(f'PYFLEX_CFG_KEY={TEST_KEY}\n', encoding='utf-8')
+    (tmp_path / 'app.yaml').write_text('secret: !encr myvalue\n', encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path, cfg_key=None)
+    encrypted = (tmp_path / 'app.yaml').read_text(encoding='utf-8').split('!encr ')[1].strip()
+
+    assert result.returncode == 0, f'key from the .env file must be used, got {result.stderr!r}'
+    assert AESCipher(TEST_KEY).decrypt(encrypted) == 'myvalue', 'value must be encrypted with the .env key'
+
+
 def test_encrypt_rewrites_plaintext_value(tmp_path):
     (tmp_path / 'app.yaml').write_text('service:\n  secret: !encr myplainvalue\n', encoding='utf-8')
     result = _run('encrypt', config_root=tmp_path)
@@ -202,6 +243,25 @@ def test_encrypt_unknown_cmd_exits_nonzero():
     assert 'Unknown' in result.stderr or 'Available' in result.stderr
 
 
+@pytest.mark.parametrize(
+    'args',
+    [
+        pytest.param(('--dryrun',), id='misspelled flag'),
+        pytest.param(('--dry_run',), id='underscore flag'),
+        pytest.param(('--dry-run', '--verbose'), id='valid flag plus unknown'),
+        pytest.param(('some_path',), id='positional argument'),
+    ],
+)
+def test_encrypt_unknown_option_rejected_without_writing(tmp_path, args):
+    original = 'secret: !encr myvalue\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run('encrypt', *args, config_root=tmp_path)
+
+    assert result.returncode == 1, f'unknown encrypt arguments must fail, got stdout {result.stdout!r}'
+    assert 'Unknown' in result.stderr, f'got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must not be modified'
+
+
 def test_encrypt_unparsable_file_reported_without_content(tmp_path):
     original = 'secret: !encr myvalue\nbroken: "unclosed hunter2\n'
     (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
@@ -211,6 +271,16 @@ def test_encrypt_unparsable_file_reported_without_content(tmp_path):
     assert 'cannot be parsed as YAML' in result.stderr, f'got {result.stderr!r}'
     assert 'hunter2' not in result.stdout + result.stderr, 'file content must not be echoed'
     assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must stay untouched'
+
+
+def test_encrypt_upgrades_fast_ciphertext_under_kdf_tag(tmp_path):
+    (tmp_path / 'app.yaml').write_text(f'secret: !encr_kdf {TEST_ENCRYPTED_STRING}\n', encoding='utf-8')
+    result = _run('encrypt', config_root=tmp_path)
+    upgraded = (tmp_path / 'app.yaml').read_text(encoding='utf-8').split('!encr_kdf ')[1].strip()
+
+    assert result.returncode == 0, f'got {result.stderr!r}'
+    assert AESCipher.is_kdf(upgraded), 'value under !encr_kdf must end up PBKDF2-encrypted'
+    assert AESCipher(TEST_KEY).decrypt(upgraded) == TEST_STRING, 'upgraded value must hold the original secret'
 
 
 def test_env_not_set_shows_placeholder():
@@ -250,8 +320,11 @@ def _run(*args, config_root=_CLI_CONFIG, extra_env=None, cfg_key=TEST_KEY):
     """Run `python -m pyflexcfg <args>` with a controlled environment."""
     import os
 
-    env = {**os.environ, 'PYFLEX_CFG_ROOT_PATH': str(config_root), 'PYFLEX_CFG_KEY': cfg_key}
+    env = {**os.environ, 'PYFLEX_CFG_ROOT_PATH': str(config_root)}
     env.pop('PYFLEX_ENV', None)
+    env.pop('PYFLEX_CFG_KEY', None)
+    if cfg_key is not None:
+        env['PYFLEX_CFG_KEY'] = cfg_key
     if extra_env:
         env.update(extra_env)
     return subprocess.run(

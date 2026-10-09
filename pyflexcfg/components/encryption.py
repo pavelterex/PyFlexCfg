@@ -168,6 +168,11 @@ class AESCipher(ICipher):
         return _decode_strict(value)[:_HEADER_SIZE] in (_V.FAST, _V.KDF)
 
     @staticmethod
+    def is_kdf(value: bytes | str) -> bool:
+        """Tell whether `value` is a current-format ciphertext made by :meth:`encrypt_kdf`."""
+        return _decode_strict(value)[:_HEADER_SIZE] == _V.KDF
+
+    @staticmethod
     def is_legacy(value: bytes | str) -> bool:
         """Tell whether `value` has the shape of a v2 AES-CBC ciphertext."""
         raw = _decode_strict(value)
