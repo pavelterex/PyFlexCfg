@@ -65,16 +65,18 @@ class AESCipher(ICipher):
         marker is treated as a v2 AES-CBC ciphertext and decrypted with a WARNING.
 
         Args:
-            ciphertext: Base64 ciphertext string or bytes.
+            ciphertext: Base64 ciphertext string or bytes. Whitespace in it is
+                ignored, so a value wrapped across lines decrypts.
 
         Returns:
             Decrypted plaintext string.
 
         Raises:
-            RuntimeError: Unknown version byte, or input in neither format.
+            RuntimeError: Unknown version byte, or input in neither format,
+                including text that is not valid base64.
             ValueError: Wrong key or corrupted ciphertext.
         """
-        raw = base64.b64decode(ciphertext)
+        raw = _decode(ciphertext)
         header, body = raw[:_HEADER_SIZE], raw[_HEADER_SIZE:]
 
         # A marked value must hold at least its header, and a known format its salt, nonce and tag as well.
@@ -121,7 +123,7 @@ class AESCipher(ICipher):
         Raises:
             ValueError: Not CBC-shaped, wrong key, or corrupted ciphertext.
         """
-        raw = base64.b64decode(ciphertext)
+        raw = _decode(ciphertext)
 
         if not _has_cbc_shape(raw):
             raise ValueError('Not a legacy AES-CBC ciphertext')
@@ -175,23 +177,23 @@ class AESCipher(ICipher):
     @staticmethod
     def has_marker(value: bytes | str) -> bool:
         """Tell whether `value` carries the ``PFLX`` marker, even if truncated or of an unknown version."""
-        return _decode_strict(value).startswith(_MAGIC)
+        return _decode(value).startswith(_MAGIC)
 
     @staticmethod
     def is_encrypted(value: bytes | str) -> bool:
         """Tell whether `value` is a complete ciphertext in the current AES-GCM format."""
-        return _is_complete(_decode_strict(value))
+        return _is_complete(_decode(value))
 
     @staticmethod
     def is_kdf(value: bytes | str) -> bool:
         """Tell whether `value` is a complete current-format ciphertext made by :meth:`encrypt_kdf`."""
-        raw = _decode_strict(value)
+        raw = _decode(value)
         return raw.startswith(_V.KDF) and _is_complete(raw)
 
     @staticmethod
     def is_legacy(value: bytes | str) -> bool:
         """Tell whether `value` has the shape of a v2 AES-CBC ciphertext."""
-        raw = _decode_strict(value)
+        raw = _decode(value)
         return not raw.startswith(_MAGIC) and _has_cbc_shape(raw)
 
     def _derive_key(self, salt: bytes) -> bytes:
@@ -203,19 +205,25 @@ class AESCipher(ICipher):
         ).derive(self._passphrase)
 
 
-def _decode_strict(value: bytes | str) -> bytes:
-    """Base64-decode `value`, returning empty bytes when it is not valid base64."""
+def _decode(value: bytes | str) -> bytes:
+    """
+    Base64-decode `value`, ignoring ASCII whitespace; empty bytes when it is not valid base64.
+
+    Decrypting and classifying both go through here, so they always agree on what a value is.
+    """
+    data = value.encode('utf-8') if isinstance(value, str) else bytes(value)
+
     try:
-        return base64.b64decode(value, validate=True)
+        return base64.b64decode(b''.join(data.split()), validate=True)
     except ValueError:
         return b''
+
+
+def _has_cbc_shape(raw: bytes) -> bool:
+    return len(raw) >= _CBC_BLOCK_SIZE * 2 and len(raw) % _CBC_BLOCK_SIZE == 0
 
 
 def _is_complete(raw: bytes) -> bool:
     """Tell whether `raw` has a known header and at least that format's salt, nonce and GCM tag."""
     min_size = _MIN_SIZES.get(raw[:_HEADER_SIZE])
     return min_size is not None and len(raw) >= min_size
-
-
-def _has_cbc_shape(raw: bytes) -> bool:
-    return len(raw) >= _CBC_BLOCK_SIZE * 2 and len(raw) % _CBC_BLOCK_SIZE == 0

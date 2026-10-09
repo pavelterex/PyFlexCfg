@@ -25,6 +25,24 @@ def test_decrypt_accepts_str(cipher):
     assert cipher.decrypt(TEST_ENCRYPTED_STRING) == TEST_STRING
 
 
+@pytest.mark.parametrize('method', ['encrypt', 'encrypt_kdf'])
+@pytest.mark.parametrize(
+    'wrap',
+    [
+        pytest.param(lambda ct: f'{ct[:20]} {ct[20:]}', id='space, as YAML folds a wrapped value'),
+        pytest.param(lambda ct: f'{ct[:20]}\n  {ct[20:]}\n', id='newlines and indentation'),
+        pytest.param(lambda ct: f'\t{ct}\r\n', id='surrounding whitespace'),
+        pytest.param(lambda ct: f'{ct[:20]} {ct[20:]}'.encode('ascii'), id='bytes'),
+    ],
+)
+def test_decrypt_ignores_whitespace_in_ciphertext(cipher, method, wrap):
+    wrapped = wrap(getattr(cipher, method)(TEST_STRING))
+
+    assert cipher.decrypt(wrapped) == TEST_STRING, 'a ciphertext wrapped with whitespace must still decrypt'
+    assert AESCipher.is_encrypted(wrapped), 'and must be recognised as encrypted, or the CLI would encrypt it again'
+    assert AESCipher.has_marker(wrapped), 'and must be recognised as marked'
+
+
 def test_decrypt_marker_only_ciphertext_reports_truncation(cipher):
     marker_only = base64.b64encode(b'PFLX')
 
@@ -33,6 +51,19 @@ def test_decrypt_marker_only_ciphertext_reports_truncation(cipher):
 
     assert AESCipher.has_marker(marker_only), 'the bare marker still counts as marked'
     assert not AESCipher.is_encrypted(marker_only), 'the bare marker is not a ciphertext'
+
+
+@pytest.mark.parametrize('stray', ['-', '!', '_', '*'])
+@pytest.mark.parametrize('source', ['current', 'legacy'])
+def test_decrypt_rejects_stray_characters_in_ciphertext(cipher, source, stray):
+    ciphertext = cipher.encrypt(TEST_STRING) if source == 'current' else TEST_CBC_CIPHERTEXT
+    damaged = f'{ciphertext[:10]}{stray}{ciphertext[10:]}'
+
+    with pytest.raises(RuntimeError, match='Unrecognized ciphertext format'):
+        cipher.decrypt(damaged)
+
+    assert not AESCipher.is_encrypted(damaged), 'what does not decrypt must not be classified as encrypted'
+    assert not AESCipher.is_legacy(damaged), 'what does not decrypt must not be classified as legacy'
 
 
 @pytest.mark.parametrize('keep', [5, 20, -1], ids=['header only', 'header and part of the nonce', 'one byte short'])
@@ -191,6 +222,14 @@ def test_legacy_cbc_iv_resembling_a_version_byte_decrypts(cipher, first_iv_byte)
     ct = _cbc_encrypt(TEST_STRING, first_iv_byte + os.urandom(15))
 
     assert cipher.decrypt(ct) == TEST_STRING, f'IV starting with {first_iv_byte!r} was misrouted'
+
+
+def test_legacy_cbc_wrapped_with_whitespace_decrypts(cipher):
+    wrapped = f'{TEST_CBC_CIPHERTEXT[:16]}\n  {TEST_CBC_CIPHERTEXT[16:]}'
+
+    assert cipher.decrypt(wrapped) == TEST_STRING, 'a wrapped legacy ciphertext must still decrypt'
+    assert AESCipher.is_legacy(wrapped), 'and must be recognised as legacy, so the CLI migrates it'
+    assert cipher.decrypt_legacy(wrapped) == TEST_STRING, 'decrypt_legacy must accept the same input'
 
 
 def test_legacy_cbc_warns_to_migrate(cipher, caplog):

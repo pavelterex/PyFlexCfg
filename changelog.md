@@ -125,6 +125,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   process itself provided, or removes it from `os.environ` if the process never set it. A dropped
   `CFG__*` override or Vault credential stops applying, and a process-provided variable the file
   merely repeated is kept. A variable the process changed after PyFlexCfg set it is left alone.
+- **Ciphertexts are decoded the same way for loading and for classification.** Whitespace in a
+  ciphertext is ignored, so a value wrapped across lines loads and is recognised by
+  `AESCipher.is_encrypted()` and by `pyflexcfg encrypt`, which used to encrypt such a value a second
+  time. Any other non-base64 character now makes `decrypt()` raise
+  `RuntimeError: Unrecognized ciphertext format`; 2.x silently dropped such characters.
 - **`Cfg.reload_config(reset=True)` now drops every config value before loading**, not only
   mapping-valued ones. Top-level scalars and lists set by the env layer, a `CFG__*` override or
   runtime assignment no longer survive a reload after their source is gone. `reset=False` is

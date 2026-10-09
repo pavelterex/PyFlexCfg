@@ -549,6 +549,18 @@ ones and from plaintext. `AESCipher.is_encrypted(value)` performs the same check
 the value to be complete — long enough to hold its nonce and authentication tag — so a truncated
 ciphertext is not mistaken for an encrypted value.
 
+Whitespace inside a ciphertext is ignored, so a long value may be wrapped across lines:
+
+```yaml
+db_pass: !encr_kdf
+  UEZMWAJSc2FsdHNhbHRzYWx0c2FsdG5vbmNlbm9uY2Vub25j
+  ZWNpcGhlcnRleHRjaXBoZXJ0ZXh0dGFndGFndGFndGFn
+```
+
+Any other character that is not base64 makes the value invalid: it fails to load with "Unrecognized
+ciphertext format" and `pyflexcfg encrypt` treats it as not encrypted. Loading and the CLI use the
+same decoding, so a value that loads is never encrypted a second time.
+
 At load time each value decrypts into a `Secret`. `Secret` is a `str` subclass — its `repr`,
 `str()`, f-strings, and `%`-format arguments all output `********`. Equality and slicing work
 normally on the underlying value.

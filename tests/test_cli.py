@@ -271,6 +271,18 @@ def test_encrypt_skips_already_encrypted(tmp_path):
 
 
 @pytest.mark.parametrize('args', [('encrypt',), ('encrypt', '--dry-run')], ids=['write', 'dry-run'])
+def test_encrypt_skips_ciphertext_wrapped_across_lines(tmp_path, args):
+    original = f'secret: !encr\n  {TEST_ENCRYPTED_STRING[:20]}\n  {TEST_ENCRYPTED_STRING[20:]}\nother: 1\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    loaded = yaml.load(original, YamlLoader)
+    result = _run(*args, config_root=tmp_path)
+
+    assert loaded['secret'] == TEST_STRING, 'the wrapped ciphertext must load, or this test proves nothing'
+    assert result.returncode == 0, f'a value that loads must count as encrypted, got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'it must not be encrypted again'
+
+
+@pytest.mark.parametrize('args', [('encrypt',), ('encrypt', '--dry-run')], ids=['write', 'dry-run'])
 @pytest.mark.parametrize('raw', [b'PFLX\x01', b'PFLX\x02' + b'\x00' * 20, b'PFLX\x09' + b'\x00' * 60], ids=str)
 def test_encrypt_marked_but_invalid_ciphertext_left_untouched(tmp_path, raw, args):
     original = f'secret: !encr {base64.b64encode(raw).decode("ascii")}\n'

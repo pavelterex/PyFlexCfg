@@ -210,7 +210,9 @@ For other variables PyFlexCfg does not detect conflicts: define each variable in
   `'%s' % secret` all insert `********`; use `'prefix' + secret + 'suffix'` or `''.join([...])`, and
   wrap the result in `Secret(...)` to keep it masked. Path tags (`!path` etc.) cannot mask a secret.
 - **Ciphertext format is `PFLX` + version byte + payload.** Never detect encryption by the first
-  byte alone; use `AESCipher.is_encrypted()`.
+  byte alone; use `AESCipher.is_encrypted()`. Whitespace inside a ciphertext is ignored everywhere
+  (a value may be wrapped across YAML lines); any other non-base64 character makes it invalid, both
+  for `decrypt()` (`RuntimeError: Unrecognized ciphertext format`) and for the `is_*` checks.
 
 ---
 
