@@ -109,6 +109,9 @@ For other variables PyFlexCfg does not detect conflicts: define each variable in
   Without a valid config root that line raises `RuntimeError`. A bare `import pyflexcfg`, or
   importing only `AESCipher` / `AttrDict` / `Required` / `Secret`, loads nothing and cannot fail
   this way.
+- **A failed first load leaves nothing behind.** If requesting `Cfg` raises (missing config root,
+  unsatisfied `!required`, bad override), the next request rebuilds the config from disk; no layer
+  or override from the failed attempt survives.
 - **Only the first load is thread-safe.** Concurrent first requests for `Cfg` load it once behind a
   lock. `Cfg.reload_config()` and runtime mutation of `Cfg` are not synchronised.
 - **In tests**, call `Cfg.reload_config(config_path=...)` to switch config roots between cases.
@@ -177,6 +180,9 @@ For other variables PyFlexCfg does not detect conflicts: define each variable in
   `::pure_path`, `::pure_path_posix`, `::pure_path_win`. A path suffix takes the whole path as one
   string (`/var/log/app.log::path`). `::proj_root` raises `RuntimeError` when no project root is
   resolvable. Without a suffix the value is auto-coerced `int` → `float` → `bool` → `str`.
+  Only the text after the last `::` counts, and only if it is exactly a suffix name; otherwise the
+  value is kept whole (`fe80::1` stays `fe80::1`). A value that itself ends in a suffix name needs
+  an explicit `::str` (`report::int::str` → `'report::int'`).
 - **`CFG__*` overrides cannot target handler names.** A first path component that starts with `_`
   or names a handler member (`reload_config`, `apply_env_layer`, `update_from_env`,
   `validate_required`, `config_root`, `project_root`) raises `RuntimeError`. Paths under `env` are

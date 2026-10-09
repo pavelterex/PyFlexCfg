@@ -97,7 +97,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `Secret`, no longer loads anything or needs a config directory; code relying on a bare
   `import pyflexcfg` to fail fast must reference `pyflexcfg.Cfg`. The first load is guarded by a
   lock, so threads requesting `Cfg` simultaneously load it once; `reload_config()` and runtime
-  mutation remain unsynchronised.
+  mutation remain unsynchronised. If the first access fails (for example on a missing `!required`
+  key) and you request `Cfg` again, the config is rebuilt from disk, so nothing the failed attempt
+  applied carries over.
 - **`!string` composes secrets correctly.** A part tagged `!encr`, `!encr_kdf` or `!vault` used to be
   joined as its mask, producing e.g. `'postgresql://app:********@db'`. The real value is now joined
   in and the result is a `Secret`, so `!string ['postgresql://app:', !encr …, '@db']` yields a usable,
@@ -115,6 +117,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `::yaml_m` onto such a key now merges instead of replacing. An override whose first component is
   private or a handler member (`CFG__RELOAD_CONFIG=…`) used to replace that member on `Cfg` and now
   raises `RuntimeError`.
+- **A `::` inside a `CFG__*` value is no longer cut off.** When the text after the last `::` was not
+  a known type suffix, 2.x dropped it silently: `fe80::1` became `fe80` and `pa::ss::word` became
+  `pa::ss`. Such a value is now kept whole. As a consequence `42::yaml`, which used to become the
+  integer `42`, is now the string `42::yaml`; use a real suffix (`42::int`) to cast.
 - **`CFG__*` overrides match keys case-insensitively.** `CFG__APP__APIKEY=…` used to leave a key
   spelled `apiKey` untouched and add a stray `apikey`; it now updates `apiKey`. An exact lowercase
   key still wins, and two keys differing only in case with no exact match raise `RuntimeError`.
@@ -155,8 +161,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a scalar or list (`CFG__DB__PASSWORD__X=…`), the "cannot assign" debug message included that
   value's `repr`. It now logs only the value's type.
 - **Debug log no longer leaks env-var values on unknown `::Type` suffix.** When `update_from_env()`
-  encounters an unrecognised type suffix (e.g. `CFG__X=secret::nosuchtype`), the log message now
-  records only the type name, never the value that preceded `::` — which could have been a secret.
+  encounters an unrecognised type suffix (e.g. `CFG__X=secret::nosuchtype`, or a secret that simply
+  contains `::`, such as `abc::hunter2`), the log message now names the variable only. Neither the
+  text before `::` nor the text after it is logged, since either may be part of a secret.
 
 ---
 

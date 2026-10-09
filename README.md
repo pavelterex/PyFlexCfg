@@ -145,6 +145,10 @@ package — in practice, at your `from pyflexcfg import Cfg` line. That is also 
 root or an unsatisfied `!required` key raises. A bare `import pyflexcfg`, or importing only
 `AESCipher`, `AttrDict`, `Required` or `Secret`, loads nothing and needs no config directory.
 
+If that first load fails, nothing is kept: requesting `Cfg` again, once you have fixed the cause,
+loads the configuration from disk afresh, without any layer or override the failed attempt had
+already applied.
+
 That first load is thread-safe: if several threads request `Cfg` at the same moment, the config is
 loaded once and every thread receives the same fully loaded object. Later calls to
 `Cfg.reload_config()` and any changes you make to `Cfg` at runtime are not synchronised — guard
@@ -321,6 +325,21 @@ CFG__APP__CACHE_DIR=.cache/my-app::home_dir    # Path.home() / '.cache' / 'my-ap
 CFG__APP__DATA_DIR=data/raw::proj_root         # <project root> / 'data' / 'raw'
 CFG__APP__REMOTE_LOG=/var/log/app.log::pure_path_posix   # PurePosixPath, on any host
 ```
+
+**Values that contain `::` themselves.** Only the text after the *last* `::` is looked at, and only
+if it is exactly one of the suffixes above is it treated as a type. Anything else leaves the value
+whole:
+
+```dotenv
+CFG__NET__GATEWAY=fe80::1                # stays 'fe80::1'
+CFG__DB__PASSWORD=pa::ss::word           # stays 'pa::ss::word'
+CFG__NET__GATEWAY=fe80::1::str           # 'fe80::1' — the final ::str is the suffix
+CFG__DB__PASSWORD=pa::ss::word::Secret   # Secret('pa::ss::word')
+```
+
+The one case to watch is a value whose own ending happens to be a suffix name. `CFG__X=report::int`
+is read as "cast `report` to `int`" and fails. Add `::str` to keep such a value as it is:
+`CFG__X=report::int::str` gives `'report::int'`.
 
 `::yaml_m` falls back to replace semantics when either side is not a dict. Overrides for missing
 dotted paths are logged at DEBUG level and skipped.

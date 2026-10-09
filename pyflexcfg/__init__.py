@@ -10,6 +10,8 @@ if TYPE_CHECKING:
 __all__ = ['AESCipher', 'AttrDict', 'Cfg', 'Required', 'Secret']
 
 _load_lock = threading.RLock()
+# Set when a first access failed after it had already changed the handler class.
+_load_state = {'failed': False}
 
 
 def __getattr__(name: str) -> Any:
@@ -24,9 +26,19 @@ def __getattr__(name: str) -> Any:
 
         from .config_handler import ConfigHandler  # noqa: PLC0415
 
-        ConfigHandler.apply_env_layer()
-        ConfigHandler.update_from_env()
-        ConfigHandler.validate_required()
+        try:
+            if _load_state['failed']:
+                # The class still carries the failed attempt's layer and overrides: rebuild it from disk.
+                ConfigHandler.reload_config()
+            else:
+                ConfigHandler.apply_env_layer()
+                ConfigHandler.update_from_env()
+                ConfigHandler.validate_required()
+        except Exception:
+            _load_state['failed'] = True
+            raise
+
+        _load_state['failed'] = False
         globals()['Cfg'] = ConfigHandler
 
         return ConfigHandler

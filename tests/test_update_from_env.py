@@ -270,12 +270,26 @@ def test_top_level_override_dropped_on_reload_after_var_removed(loaded_cfg, monk
     assert loaded_cfg.general.host == 'localhost', 'file-backed config must be reloaded'
 
 
-def test_unknown_yaml_suffix_falls_back_to_auto_coercion(loaded_cfg, monkeypatch):
-    """Bare ::yaml is no longer a known suffix; value falls through to autodetect."""
-    monkeypatch.setenv('CFG__GENERAL__HOST', '42::yaml')
+@pytest.mark.parametrize(
+    'raw, expected',
+    [
+        pytest.param('fe80::1', 'fe80::1', id='IPv6 address'),
+        pytest.param('::1', '::1', id='IPv6 loopback'),
+        pytest.param('pa::ss::word', 'pa::ss::word', id='separator twice'),
+        pytest.param('42::yaml', '42::yaml', id='suffix that is not a type'),
+        pytest.param('trailing::', 'trailing::', id='separator at the end'),
+        pytest.param('fe80::1::str', 'fe80::1', id='known suffix after an inner separator'),
+        pytest.param('a::b::Secret', 'a::b', id='Secret suffix after an inner separator'),
+    ],
+)
+def test_separator_without_known_suffix_keeps_whole_value(loaded_cfg, monkeypatch, raw, expected):
+    monkeypatch.setenv('CFG__GENERAL__HOST', raw)
     loaded_cfg.update_from_env()
 
-    assert loaded_cfg.general.host == 42, f'unknown suffix should drop and auto-coerce, got {loaded_cfg.general.host!r}'
+    assert loaded_cfg.general.host == expected, (
+        f'{raw!r} must be stored as {expected!r}, got {loaded_cfg.general.host!r}'
+    )
+    assert isinstance(loaded_cfg.general.host, str), f'expected a string, got {type(loaded_cfg.general.host).__name__}'
 
 
 def test_yaml_m_cast_merges_dict_into_existing(loaded_cfg, monkeypatch):

@@ -272,7 +272,7 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             root = {key: cls.__dict__[key] for key in cls._config_keys()}
 
             try:
-                converted, merge = cls._convert_value_type(var_value)
+                converted, merge = cls._convert_value_type(var_value, var_name)
                 container, missing = _descend(root, parents)
                 target = _match_key(container, leaf) if isinstance(container, Mapping) else _MISSING
             except (RuntimeError, ValueError) as exc:
@@ -328,19 +328,21 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             raise RuntimeError(f'Required config values are missing: {missing}')
 
     @staticmethod
-    def _convert_value_type(src_value: str) -> tuple[Any, bool]:
+    def _convert_value_type(src_value: str, var_name: str) -> tuple[Any, bool]:
         """
         Convert an env-var string to a typed value and report merge intent.
 
-        If the value contains the `::` separator, the suffix names an explicit
-        target type (`int`, `float`, `bool`, `str`, `Secret`,
-        `yaml_m`, `yaml_r`, or a path type named after its YAML tag, such as
-        `path` or `proj_root`). Otherwise the string is auto-coerced as
-        `int` → `float` → `bool` and falls back to the original `str`
-        if none succeed.
+        If the value ends in `::` followed by a known type name (`int`,
+        `float`, `bool`, `str`, `Secret`, `yaml_m`, `yaml_r`, or a path type
+        named after its YAML tag, such as `path` or `proj_root`), that suffix
+        is removed and the rest is cast to the type. Otherwise the whole string,
+        any `::` included, is auto-coerced as `int` → `float` → `bool` and
+        falls back to the original `str` if none succeed.
 
         Args:
             src_value: Raw environment-variable value.
+            var_name: Name of the variable, used in log messages in place of
+                any part of the value.
 
         Returns:
             A `(value, merge)` tuple. `merge` is True only for `::yaml_m`;
@@ -364,8 +366,9 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                     # The value may be a secret: keep it, and the cause that quotes it, out of the error.
                     raise ValueError(f'value could not be cast as {value_type!r} ({type(exc).__name__})') from None
 
-            logger.debug('Unknown type suffix %r; falling back to auto-conversion', value_type)
-            src_value = value
+            # Not a type suffix, so `::` is part of the value (an IPv6 address, a password) and stays in it.
+            # Neither side of the separator is logged: either may be part of a secret.
+            logger.debug('%s contains "::" without a known type suffix; keeping the value whole', var_name)
 
         for caster in (int, float, _to_bool):
             try:

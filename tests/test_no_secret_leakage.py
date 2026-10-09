@@ -189,12 +189,22 @@ def test_update_from_env_unassignable_path_omits_existing_value(monkeypatch, tmp
     assert NEEDLE not in caplog.text, 'the existing config value leaked into the skip log'
 
 
-def test_update_from_env_unknown_type_does_not_log_value(monkeypatch, caplog):
-    # An unknown ::type suffix must log only the type name, not the value before `::`.
-    monkeypatch.setenv('CFG__APP__GENERAL__VAR_STR', 'hunter2::nosuchtype')
+@pytest.mark.parametrize(
+    'raw',
+    [
+        pytest.param('hunter2::nosuchtype', id='secret before the separator'),
+        pytest.param('abc::hunter2', id='secret after the separator'),
+        pytest.param('hunter2::hunter2', id='secret on both sides'),
+    ],
+)
+def test_update_from_env_unknown_type_does_not_log_value(monkeypatch, caplog, raw):
+    # Either side of `::` may be part of a secret, so neither may reach the log.
+    monkeypatch.setenv('CFG__APP__GENERAL__VAR_STR', raw)
     with caplog.at_level(logging.DEBUG, logger='pyflexcfg'):
         Cfg.update_from_env()
-    assert 'hunter2' not in caplog.text
+
+    assert 'hunter2' not in caplog.text, 'part of the raw value leaked into the debug log'
+    assert 'CFG__APP__GENERAL__VAR_STR' in caplog.text, 'the fallback must still be logged, naming the variable'
 
 
 def test_validate_required_error_lists_paths_not_sibling_values():

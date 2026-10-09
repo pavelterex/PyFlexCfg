@@ -15,6 +15,24 @@ from pyflexcfg.config_handler import ConfigHandler
 
 _CLI_CONFIG = Path(__file__).parent / 'test_data' / 'cli_config'
 _REQUIRED_CONFIG = Path(__file__).parent / 'test_data' / 'required_config'
+_RETRY_CODE = """
+import os
+import pyflexcfg
+
+os.environ['CFG__ADHOC'] = 'temporary'
+try:
+    pyflexcfg.Cfg
+except RuntimeError:
+    print('first access failed')
+
+del os.environ['CFG__ADHOC']
+os.environ['CFG__APP__SERVER__HOST'] = 'srv'
+os.environ['CFG__APP__DATABASE__HOST'] = 'db'
+os.environ['CFG__APP__DATABASE__PASSWORD'] = 'pw'
+cfg = pyflexcfg.Cfg
+print('leftover:', hasattr(cfg, 'adhoc'))
+print('host:', cfg.app.server.host)
+"""
 
 
 def test_cfg_access_without_config_root_raises(tmp_path):
@@ -60,6 +78,16 @@ def test_cfg_loads_once_under_concurrent_first_access(monkeypatch):
 
     assert len(apply_calls) == 1, f'post-load steps ran {len(apply_calls)} times, expected once'
     assert results == [ConfigHandler] * thread_count, 'every thread must receive the loaded Cfg'
+
+
+def test_cfg_retry_after_failed_first_access_starts_clean(tmp_path):
+    result = _run_code(_RETRY_CODE, cwd=tmp_path, root=_REQUIRED_CONFIG)
+    lines = result.stdout.splitlines()
+
+    assert result.returncode == 0, f'the retry must succeed once the required keys are supplied: {result.stderr!r}'
+    assert 'first access failed' in lines, f'the first access must fail on the required keys, got {lines!r}'
+    assert 'leftover: False' in lines, f'a failed first access left its override on the config: {lines!r}'
+    assert 'host: srv' in lines, f'the retry must apply the current overrides, got {lines!r}'
 
 
 def test_first_load_rejects_more_than_one_env_file(tmp_path):
