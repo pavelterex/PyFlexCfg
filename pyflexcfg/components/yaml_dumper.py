@@ -15,12 +15,17 @@ class YamlDumper(SafeDumper):
         def represent_attr_dict(dumper: YamlDumper, value: AttrDict) -> MappingNode:
             return dumper.represent_mapping('tag:yaml.org,2002:map', value.as_dict())
 
+        def represent_other(dumper: YamlDumper, value: Any) -> ScalarNode:
+            return dumper.represent_scalar('tag:yaml.org,2002:str', repr(value))
+
         def represent_path(dumper: YamlDumper, value: PurePath) -> ScalarNode:
             return dumper.represent_scalar('tag:yaml.org,2002:str', str(value))
 
         def represent_secret(dumper: YamlDumper, value: Secret) -> ScalarNode:
             return dumper.represent_scalar('tag:yaml.org,2002:str', repr(value))
 
+        # `None` is PyYAML's slot for types with no representer; SafeDumper raises there by default.
+        self.add_representer(None, represent_other)
         self.add_representer(AttrDict, represent_attr_dict)
         self.add_representer(Secret, represent_secret)
         self.add_multi_representer(PurePath, represent_path)

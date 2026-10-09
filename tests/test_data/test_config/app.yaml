@@ -1,7 +1,7 @@
 general:
   var_str: test
   var_empty_str: ''
-  var_secret_str: !encr u8euuCiFlgzpI2aY6/vYtJbQ4ApNbqtnwTjYVJ/APs2aRVD8XbC6tiEsmrcKjqXd
+  var_secret_str: !encr UEZMWAHPhy7m1lZyxV1HCHN2dNROWwriY67DKnTE3rTKJtwVr0RW7y0lhjJ8nRU4KAoK
   var_int: 500
   var_float: 10.5
   var_bool_true: true

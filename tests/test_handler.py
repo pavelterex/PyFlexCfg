@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -11,6 +12,8 @@ from pytest_assume.plugin import assume
 from pyflexcfg import Cfg
 from pyflexcfg.components.encryption import AESCipher
 from pyflexcfg.components.misc import AttrDict, Secret
+
+_UNREACHABLE = 'cannot be read with dot notation'
 
 IMPROPER_NAMES_PARAM_SET = [
     param('_testname_', id='private like'),
@@ -108,6 +111,14 @@ class TestHandler:
 
         assert Cfg.app.general.var_int == 500, f'reload should restore loaded value, got {Cfg.app.general.var_int!r}'
 
+    def test_reload_drops_callable_runtime_value(self):
+        Cfg.callback = lambda: None
+        Cfg.reload_config()
+
+        assert not hasattr(Cfg, 'callback'), 'a callable runtime value must be dropped like any other config value'
+        assert callable(Cfg.reload_config), 'handler methods must survive a reload'
+        assert Cfg.config_root.is_dir(), 'handler attributes must survive a reload'
+
     def test_simple_config(self):
         data = Cfg.app.general
 
@@ -120,12 +131,31 @@ class TestHandler:
         assume(data.var_bool_false is False)
         assume(data.var_null is None)
 
+    def test_str_includes_callable_runtime_value(self):
+        Cfg.callback = lambda: None
+        try:
+            dumped = str(Cfg)
+        finally:
+            del Cfg.callback
+
+        assert 'callback:' in dumped, f'a callable config value must be rendered, got {dumped!r}'
+        for handler_method in ('reload_config', 'update_from_env', 'validate_required'):
+            assert handler_method not in dumped, f'{handler_method!r} is handler machinery but was rendered'
+
+    def test_str_lists_only_config_after_reload(self):
+        Cfg.reload_config()
+        dumped = str(Cfg)
+
+        assert 'app:' in dumped, f'config must still be rendered, got {dumped!r}'
+        for handler_attr in ('config_root', 'project_root'):
+            assert handler_attr not in dumped, f'{handler_attr!r} is not a config value but was rendered'
+
 
 class TestTmpPath:
     """
     End-to-end scenarios that build a fresh config tree per test.
 
-    The autouse `_restore_cfg_after_test` fixture in `conftest.py` puts
+    The autouse `restore_cfg_after_test` fixture in `conftest.py` puts
     `Cfg` back on the main test config after each test runs.
     """
 
@@ -157,6 +187,210 @@ class TestTmpPath:
         Cfg.reload_config(config_path=tmp_path)
 
         assert os.getenv('AUTOLOAD_PROBE') == 'hello', '.env file should populate environment'
+
+    def test_env_file_conflict_after_process_changes_credential(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('VAULT_TOKEN', raising=False)
+        (tmp_path / 'vault.env').write_text('VAULT_TOKEN=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+        assert os.environ['VAULT_TOKEN'] == 'from-file', 'the file must supply the value first'
+
+        monkeypatch.setenv('VAULT_TOKEN', 'set-by-the-application')
+
+        with pytest.raises(RuntimeError, match='VAULT_TOKEN'):
+            Cfg.reload_config()
+        assert os.environ['VAULT_TOKEN'] == 'set-by-the-application', 'the process value must be left in place'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN'])
+    def test_env_file_conflicting_with_process_credential_raises(self, tmp_path: Path, monkeypatch, name):
+        monkeypatch.setenv(name, 'process-value')
+        monkeypatch.setenv('HARMLESS_PROBE', 'process-value')
+        (tmp_path / 'settings.env').write_text(f'HARMLESS_PROBE=file-value\n{name}=file-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with pytest.raises(RuntimeError) as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+        msg = str(exc_info.value)
+
+        assert name in msg, f'the error must name the variable, got {msg!r}'
+        assert 'settings.env' in msg, f'the error must name the file, got {msg!r}'
+        assert 'process-value' not in msg, 'the error must not contain the process value'
+        assert 'file-value' not in msg, 'the error must not contain the file value'
+        assert os.environ[name] == 'process-value', 'the process value must be left in place'
+        assert os.environ['HARMLESS_PROBE'] == 'process-value', 'no file value may be applied when loading is refused'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN'])
+    def test_env_file_credential_equal_to_process_value_accepted(self, tmp_path: Path, monkeypatch, name):
+        monkeypatch.setenv(name, 'same-value')
+        (tmp_path / 'settings.env').write_text(f'{name}=same-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert Cfg.general.key == 'value', 'identical values in both places are not a conflict'
+
+    def test_env_file_credential_rotated_between_reloads(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('VAULT_TOKEN', raising=False)
+        _write(tmp_path / 'general.yaml', 'key: value')
+        (tmp_path / 'vault.env').write_text('VAULT_TOKEN=first-token\n')
+        Cfg.reload_config(config_path=tmp_path)
+        assert os.environ['VAULT_TOKEN'] == 'first-token', 'a file may supply a credential the process lacks'
+
+        (tmp_path / 'vault.env').write_text('VAULT_TOKEN=rotated-token\n')
+        Cfg.reload_config()
+
+        assert os.environ['VAULT_TOKEN'] == 'rotated-token', 'a value that came from the file may be rotated in it'
+
+    @pytest.mark.parametrize('filename', ['.env', 'app.env', 'settings.prod.env'])
+    def test_env_file_recognised_by_name_ending(self, tmp_path: Path, monkeypatch, filename):
+        monkeypatch.delenv('ENV_NAME_PROBE', raising=False)
+        (tmp_path / filename).write_text('ENV_NAME_PROBE=loaded\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert os.getenv('ENV_NAME_PROBE') == 'loaded', f'{filename} was not loaded as a .env file'
+
+    @pytest.mark.parametrize('change', ['variable removed', 'file deleted'])
+    def test_env_file_removed_variable_dropped_on_reload(self, tmp_path: Path, monkeypatch, change):
+        for name in ('ENV_STALE_PROBE', 'ENV_KEPT_PROBE', 'CFG__GENERAL__KEY'):
+            monkeypatch.delenv(name, raising=False)
+        env_file = tmp_path / 'app.env'
+        env_file.write_text('ENV_STALE_PROBE=1\nENV_KEPT_PROBE=1\nCFG__GENERAL__KEY=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: from-yaml')
+        Cfg.reload_config(config_path=tmp_path)
+        assert Cfg.general.key == 'from-file', 'the file override must apply first'
+
+        if change == 'file deleted':
+            env_file.unlink()
+        else:
+            env_file.write_text('ENV_KEPT_PROBE=1\n')
+        Cfg.reload_config()
+
+        assert 'ENV_STALE_PROBE' not in os.environ, 'a variable removed from the .env file stayed in the environment'
+        assert Cfg.general.key == 'from-yaml', 'an override removed from the .env file was applied again'
+        assert os.environ.get('ENV_KEPT_PROBE') == (None if change == 'file deleted' else '1')
+
+    def test_env_file_removed_variable_kept_when_process_changed_it(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('ENV_STALE_PROBE', raising=False)
+        env_file = tmp_path / 'app.env'
+        env_file.write_text('ENV_STALE_PROBE=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+
+        monkeypatch.setenv('ENV_STALE_PROBE', 'set-by-the-application')
+        env_file.unlink()
+        Cfg.reload_config()
+
+        assert os.environ['ENV_STALE_PROBE'] == 'set-by-the-application', 'a value the process set itself was removed'
+
+    def test_env_file_removed_override_restores_process_value(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv('ENV_RESTORE_PROBE', 'from-process')
+        env_file = tmp_path / 'app.env'
+        env_file.write_text('ENV_RESTORE_PROBE=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+        assert os.environ['ENV_RESTORE_PROBE'] == 'from-file', 'the file must override the process value first'
+
+        env_file.unlink()
+        Cfg.reload_config()
+
+        assert os.environ.get('ENV_RESTORE_PROBE') == 'from-process', 'the process value must come back'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN'])
+    def test_env_file_same_value_credential_cannot_change_in_file_later(self, tmp_path: Path, monkeypatch, name):
+        monkeypatch.setenv(name, 'process-value')
+        env_file = tmp_path / 'app.env'
+        env_file.write_text(f'{name}=process-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+
+        env_file.write_text(f'{name}=changed-in-file\n')
+
+        with pytest.raises(RuntimeError, match=name):
+            Cfg.reload_config()
+        assert os.environ[name] == 'process-value', 'a process-provided credential must not be replaced by the file'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN', 'ENV_SAME_VALUE_PROBE'])
+    @pytest.mark.parametrize('change', ['variable removed', 'file deleted'])
+    def test_env_file_same_value_variable_survives_removal_from_file(self, tmp_path: Path, monkeypatch, change, name):
+        monkeypatch.setenv(name, 'same-value')
+        env_file = tmp_path / 'app.env'
+        env_file.write_text(f'{name}=same-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+
+        if change == 'file deleted':
+            env_file.unlink()
+        else:
+            env_file.write_text('')
+        Cfg.reload_config()
+
+        assert os.environ.get(name) == 'same-value', f'the process-provided {name} was removed with the file entry'
+
+    def test_env_file_selects_env_layer(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('PYFLEX_ENV', raising=False)
+        (tmp_path / 'settings.env').write_text('PYFLEX_ENV=dev\n')
+        _write(tmp_path / 'database.yaml', 'host: base-host')
+        (tmp_path / 'env').mkdir()
+        _write(tmp_path / 'env' / 'dev.yaml', 'database:\n  host: dev-host')
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert Cfg.database.host == 'dev-host', 'PYFLEX_ENV set in a .env file must select the layer'
+
+    @pytest.mark.parametrize('with_env_file', [True, False], ids=['.env present', 'no .env'])
+    def test_env_file_value_overrides_process_variable(self, tmp_path: Path, monkeypatch, with_env_file):
+        """Documented precedence: YAML < process environment < .env file."""
+        monkeypatch.setenv('PRECEDENCE_PROBE', 'from-process')
+        monkeypatch.setenv('CFG__GENERAL__HOST', 'from-process')
+        _write(tmp_path / 'general.yaml', 'host: from-yaml')
+        if with_env_file:
+            (tmp_path / 'overrides.env').write_text('PRECEDENCE_PROBE=from-file\nCFG__GENERAL__HOST=from-file\n')
+        expected = 'from-file' if with_env_file else 'from-process'
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert os.getenv('PRECEDENCE_PROBE') == expected, f'got {os.getenv("PRECEDENCE_PROBE")!r}'
+        assert Cfg.general.host == expected, f'the override must follow the same precedence, got {Cfg.general.host!r}'
+
+    def test_env_files_bare_dot_env_counts_towards_limit(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('ENV_PROBE_SHARED', raising=False)
+        (tmp_path / '.env').write_text('ENV_PROBE_SHARED=a\n')
+        (tmp_path / 'app.env').write_text('ENV_PROBE_SHARED=b\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with pytest.raises(RuntimeError, match=r'\.env files') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert "'.env'" in str(exc_info.value) or '(.env,' in str(exc_info.value), f'got {exc_info.value}'
+        assert 'ENV_PROBE_SHARED' not in os.environ, 'nothing may be applied when loading is refused'
+
+    @pytest.mark.parametrize(
+        'second_file',
+        [
+            pytest.param('ENV_PROBE_SHARED=secret-b\n', id='same variable in both'),
+            pytest.param('ENV_PROBE_ONLY_B=secret-b\n', id='different variables'),
+            pytest.param('', id='empty second file'),
+        ],
+    )
+    def test_env_files_more_than_one_refused(self, tmp_path: Path, monkeypatch, second_file):
+        for name in ('ENV_PROBE_SHARED', 'ENV_PROBE_ONLY_A', 'ENV_PROBE_ONLY_B'):
+            monkeypatch.delenv(name, raising=False)
+        (tmp_path / 'app.env').write_text('ENV_PROBE_SHARED=secret-a\nENV_PROBE_ONLY_A=secret-a\n')
+        (tmp_path / 'backup.env').write_text(second_file)
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with pytest.raises(RuntimeError, match=r'\.env files') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+        msg = str(exc_info.value)
+
+        for expected in ('app.env', 'backup.env'):
+            assert expected in msg, f'{expected!r} must be named in the error, got {msg!r}'
+        for value in ('secret-a', 'secret-b'):
+            assert value not in msg, f'{value!r} must not be in the error, got {msg!r}'
+        for name in ('ENV_PROBE_SHARED', 'ENV_PROBE_ONLY_A', 'ENV_PROBE_ONLY_B'):
+            assert name not in os.environ, f'{name} was applied although loading was refused'
 
     def test_loaded_yaml_dict_becomes_attrdict(self, tmp_path: Path):
         _write(tmp_path / 'general.yaml', 'nested:\n  key: value\n  inner:\n    deep: 42')
@@ -222,6 +456,79 @@ class TestTmpPath:
 
         assert hasattr(Cfg, 'new_only'), 'second load should populate new_only'
         assert not hasattr(Cfg, 'old_only'), 'reset=True must drop attrs from prior load'
+
+    def test_root_level_names_like_dict_methods_not_warned(self, tmp_path: Path, caplog):
+        _write(tmp_path / 'items.yaml', 'size: 1')
+        _write(tmp_path / 'general.yaml', 'host: localhost')
+
+        with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert Cfg.items.size == 1, 'a root-level name is reachable by attribute, whatever it is called'
+        assert not any(_UNREACHABLE in r.getMessage() for r in caplog.records), (
+            'a reachable root-level name, or a config with only ordinary keys, must not be warned about'
+        )
+
+    @pytest.mark.parametrize(
+        'stem',
+        ['apply_env_layer', 'config_root', 'project_root', 'reload_config', 'update_from_env', 'validate_required'],
+    )
+    def test_root_name_colliding_with_handler_member_raises(self, tmp_path: Path, stem):
+        _write(tmp_path / f'{stem}.yaml', 'key: value')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with pytest.raises(RuntimeError, match='Namespace conflict') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert stem in str(exc_info.value), f'the error must name the file stem, got {exc_info.value}'
+        for method in ('apply_env_layer', 'reload_config', 'update_from_env', 'validate_required'):
+            assert callable(getattr(Cfg, method)), f'{method} was replaced by a config file'
+        assert not isinstance(Cfg.project_root, AttrDict), 'project_root was replaced by a config file'
+
+    def test_unreachable_keys_warned(self, tmp_path: Path, caplog):
+        _write(
+            tmp_path / 'app.yaml',
+            """
+            items:
+              size: 1
+            nested:
+              keys: [a, b]
+              servers:
+                - class: web
+            my-key: hyphen
+            1: number
+            false: boolean
+            __len__: dunder
+            plain: fine
+            print: also fine
+            """,
+        )
+        _write(tmp_path / 'global.yaml', 'region: eu')
+        (tmp_path / 'env').mkdir()
+        _write(tmp_path / 'env' / 'copy.yaml', 'host: copy-host')
+
+        with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+            Cfg.reload_config(config_path=tmp_path)
+        warnings = [r.getMessage() for r in caplog.records if _UNREACHABLE in r.getMessage()]
+        expected = (
+            'app.items (dict attribute)',
+            'app.nested.keys (dict attribute)',
+            'app.nested.servers[0].class (Python keyword)',
+            "app['my-key'] (not an identifier)",
+            'app[1] (not a string)',
+            'app[False] (not a string)',
+            'app.__len__ (dict attribute)',
+            'env.copy (dict attribute)',
+            'global (Python keyword)',
+        )
+
+        assert len(warnings) == 1, f'expected one combined warning, got {warnings!r}'
+        for entry in expected:
+            assert entry in warnings[0], f'{entry!r} is missing from the warning: {warnings[0]!r}'
+        for ordinary in ('app.plain', 'app.print', 'app.nested (', 'env ('):
+            assert ordinary not in warnings[0], f'{ordinary!r} is reachable but was reported: {warnings[0]!r}'
+        assert Cfg.app['items']['size'] == 1, 'the config must still load and be readable by item access'
+        assert getattr(Cfg, 'global').region == 'eu', 'a keyword-named file must still load'
 
 
 def _write(path: Path, content: str) -> None:

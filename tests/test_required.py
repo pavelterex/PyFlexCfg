@@ -1,0 +1,216 @@
+"""Tests for !required tag and validate_required() (Feature 2)."""
+
+from pathlib import Path
+
+import pytest
+
+from pyflexcfg import Cfg
+from pyflexcfg.components.misc import Required
+
+_BASE_CONFIG = Path(__file__).parent / 'test_data' / 'test_config'
+_REQUIRED_CONFIG = Path(__file__).parent / 'test_data' / 'required_config'
+_SEQUENCE_YAML = 'hosts:\n  - host-a\n  - !required\nservers:\n  - name: primary\n    host: !required\n'
+
+
+def test_required_error_names_dotted_path(monkeypatch):
+    with pytest.raises(RuntimeError) as exc_info:
+        _load_required(monkeypatch)
+    msg = str(exc_info.value)
+    assert 'server.host' in msg or 'database.host' in msg
+
+
+def test_required_in_active_layer_satisfied_by_override(monkeypatch, tmp_path):
+    _write_layered_config(tmp_path)
+    monkeypatch.setenv('PYFLEX_ENV', 'prd')
+    monkeypatch.setenv('CFG__DATABASE__PASSWORD', 'from-env-var')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.database.password == 'from-env-var', f'got {Cfg.database.password!r}'
+    assert Cfg.database.host == 'prd-db', 'the active layer must still be merged'
+
+
+def test_required_in_active_layer_unsatisfied_reports_effective_path(monkeypatch, tmp_path):
+    _write_layered_config(tmp_path)
+    monkeypatch.setenv('PYFLEX_ENV', 'prd')
+
+    with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+    msg = str(exc_info.value)
+
+    assert "'database.password'" in msg, f'the effective path must be reported, got {msg!r}'
+    assert 'env.prd' not in msg, f'the layer definition itself must not be reported, got {msg!r}'
+
+
+@pytest.mark.parametrize('active', ['dev', None], ids=['PYFLEX_ENV set', 'PYFLEX_ENV unset'])
+def test_required_in_env_yaml_file_is_validated(monkeypatch, tmp_path, active):
+    (tmp_path / 'env.yaml').write_text('name: local\ndev:\n  password: !required\n', encoding='utf-8')
+    (tmp_path / 'database.yaml').write_text('host: base-db\n', encoding='utf-8')
+    if active:
+        monkeypatch.setenv('PYFLEX_ENV', active)
+    else:
+        monkeypatch.delenv('PYFLEX_ENV', raising=False)
+
+    with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+
+    assert "'env.dev.password'" in str(exc_info.value), f'env.yaml is ordinary config, got {exc_info.value}'
+
+
+@pytest.mark.parametrize('active', ['dev', None], ids=['another layer active', 'no layer active'])
+def test_required_in_inactive_layer_does_not_block(monkeypatch, tmp_path, active):
+    _write_layered_config(tmp_path)
+    if active:
+        monkeypatch.setenv('PYFLEX_ENV', active)
+    else:
+        monkeypatch.delenv('PYFLEX_ENV', raising=False)
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.database.host == ('dev-db' if active else 'base-db'), f'got {Cfg.database.host!r}'
+
+
+def test_required_in_sequence_reported_with_index(tmp_path):
+    (tmp_path / 'app.yaml').write_text(_SEQUENCE_YAML, encoding='utf-8')
+
+    with pytest.raises(RuntimeError) as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+    msg = str(exc_info.value)
+
+    assert 'app.hosts[1]' in msg, f'sentinel inside a list must be reported with its index, got {msg!r}'
+    assert 'app.servers[0].host' in msg, f'sentinel in a dict inside a list must be reported, got {msg!r}'
+    assert 'app.hosts[0]' not in msg, f'a real list item must not be reported, got {msg!r}'
+
+
+def test_required_inside_path_tag_satisfied_with_path_suffix(monkeypatch, tmp_path):
+    (tmp_path / 'app.yaml').write_text('log_file: !path [logs, !required , app.log]\n', encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__LOG_FILE', '/var/log/app.log::path')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.log_file == Path('/var/log/app.log'), f'got {Cfg.app.log_file!r}'
+    assert isinstance(Cfg.app.log_file, Path), 'the ::path suffix must give back a path object, as the tag would'
+
+
+@pytest.mark.parametrize('override', [None, '/var/log/app.log'], ids=['not supplied', 'whole key overridden'])
+def test_required_inside_path_tag(monkeypatch, tmp_path, override):
+    (tmp_path / 'app.yaml').write_text('log_file: !path [logs, !required , app.log]\nname: demo\n', encoding='utf-8')
+    if override is None:
+        with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert "'app.log_file'" in str(exc_info.value), f'the composed key must be reported, got {exc_info.value}'
+        return
+
+    monkeypatch.setenv('CFG__APP__LOG_FILE', override)
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.log_file == override, f'overriding the whole key must satisfy it, got {Cfg.app.log_file!r}'
+
+
+@pytest.mark.parametrize('override', [None, 'https://example.com/api'], ids=['not supplied', 'whole key overridden'])
+def test_required_inside_string_tag(monkeypatch, tmp_path, override):
+    (tmp_path / 'app.yaml').write_text("url: !string ['https://', !required , '/api']\nname: demo\n", encoding='utf-8')
+    if override is None:
+        with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert "'app.url'" in str(exc_info.value), f'the composed key must be reported, got {exc_info.value}'
+        return
+
+    monkeypatch.setenv('CFG__APP__URL', override)
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.url == override, f'overriding the whole key must satisfy it, got {Cfg.app.url!r}'
+
+
+def test_required_multiple_missing_all_reported(monkeypatch):
+    with pytest.raises(RuntimeError) as exc_info:
+        _load_required(monkeypatch)
+    msg = str(exc_info.value)
+    # required_config has server.host, database.host, database.password
+    assert msg.count('.host') + msg.count('password') >= 2
+
+
+def test_required_nested_path_in_error(monkeypatch):
+    with pytest.raises(RuntimeError) as exc_info:
+        _load_required(monkeypatch)
+    msg = str(exc_info.value)
+    assert 'database.password' in msg
+
+
+def test_required_raises_when_not_satisfied(monkeypatch):
+    with pytest.raises(RuntimeError, match='Required config values are missing'):
+        _load_required(monkeypatch)
+
+
+def test_required_satisfied_by_cfg_env_var(monkeypatch):
+    _load_required(
+        monkeypatch,
+        CFG__APP__SERVER__HOST='localhost',
+        CFG__APP__DATABASE__HOST='db-host',
+        CFG__APP__DATABASE__PASSWORD='secret',
+    )
+    assert Cfg.app.server.host == 'localhost'
+
+
+def test_required_satisfied_by_env_layer(monkeypatch, tmp_path):
+    """Env layer supplying a required value before validate_required() should satisfy it."""
+    cfg_root = tmp_path / 'config'
+    (cfg_root / 'env').mkdir(parents=True)
+    # server.yaml → Cfg.server; env layer deep-merges Cfg.env.dev.server into Cfg.server
+    (cfg_root / 'server.yaml').write_text('host: !required\nport: 8080\n')
+    (cfg_root / 'env' / 'dev.yaml').write_text('server:\n  host: dev-host\n')
+    monkeypatch.setenv('PYFLEX_ENV', 'dev')
+    Cfg.reload_config(config_path=cfg_root)
+    assert Cfg.server.host == 'dev-host'
+
+
+def test_required_sequence_satisfied_by_replacing_the_list(monkeypatch, tmp_path):
+    (tmp_path / 'app.yaml').write_text(_SEQUENCE_YAML, encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__HOSTS', '[host-a, host-b]::yaml_r')
+    monkeypatch.setenv('CFG__APP__SERVERS', '[{name: primary, host: db-1}]::yaml_r')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.hosts == ['host-a', 'host-b'], f'got {Cfg.app.hosts!r}'
+
+
+def test_required_sibling_real_values_unchanged(monkeypatch):
+    _load_required(
+        monkeypatch,
+        CFG__APP__SERVER__HOST='localhost',
+        CFG__APP__DATABASE__HOST='db-host',
+        CFG__APP__DATABASE__PASSWORD='secret',
+    )
+    assert Cfg.app.server.port == 8080
+    assert Cfg.app.database.name == 'mydb'
+
+
+def test_validate_required_explicit_call(monkeypatch):
+    """validate_required() raises when called manually after clearing a key."""
+    _load_required(
+        monkeypatch,
+        CFG__APP__SERVER__HOST='localhost',
+        CFG__APP__DATABASE__HOST='db-host',
+        CFG__APP__DATABASE__PASSWORD='secret',
+    )
+    # Manually plant a sentinel to verify the explicit call works
+    Cfg.app.server.host = Required()
+    with pytest.raises(RuntimeError, match='Required config values are missing'):
+        Cfg.validate_required()
+
+
+def _write_layered_config(root: Path) -> None:
+    """Base config plus a `dev` layer and a `prd` layer that marks the password `!required`."""
+    (root / 'env').mkdir()
+    (root / 'database.yaml').write_text('host: base-db\n', encoding='utf-8')
+    (root / 'env' / 'dev.yaml').write_text('database:\n  host: dev-db\n', encoding='utf-8')
+    (root / 'env' / 'prd.yaml').write_text('database:\n  host: prd-db\n  password: !required\n', encoding='utf-8')
+
+
+def _load_required(monkeypatch, **env_overrides):
+    """Reload into required_config, optionally setting CFG__ env vars first."""
+    for k, v in env_overrides.items():
+        monkeypatch.setenv(k, v)
+    Cfg.reload_config(config_path=_REQUIRED_CONFIG)

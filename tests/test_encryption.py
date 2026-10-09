@@ -1,36 +1,277 @@
+import base64
+import hashlib
+import logging
+import os
+
 import pytest
-from conftest import TEST_ENCRYPTED_BYTES, TEST_ENCRYPTED_STRING, TEST_KEY, TEST_STRING
+from conftest import TEST_CBC_CIPHERTEXT, TEST_ENCRYPTED_STRING, TEST_KEY, TEST_STRING
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from pytest_assume.plugin import assume
 
 from pyflexcfg.components.encryption import AESCipher
 
 
 @pytest.fixture(scope='module')
-def aes_cipher() -> AESCipher:
+def cipher() -> AESCipher:
     return AESCipher(TEST_KEY)
 
 
-def test_decrypt_accepts_bytes(aes_cipher):
-    decrypted = aes_cipher.decrypt(TEST_ENCRYPTED_BYTES)
-
-    assert decrypted == TEST_STRING, f'Expected {TEST_STRING!r}, got {decrypted!r}'
+def test_decrypt_accepts_bytes(cipher):
+    assert cipher.decrypt(TEST_ENCRYPTED_STRING.encode('ascii')) == TEST_STRING
 
 
-def test_decrypt_accepts_str(aes_cipher):
-    decrypted = aes_cipher.decrypt(TEST_ENCRYPTED_STRING)
-
-    assert decrypted == TEST_STRING, f'Expected {TEST_STRING!r}, got {decrypted!r}'
+def test_decrypt_accepts_str(cipher):
+    assert cipher.decrypt(TEST_ENCRYPTED_STRING) == TEST_STRING
 
 
-def test_encrypt_decrypt_round_trip(aes_cipher):
-    encrypted = aes_cipher.encrypt(TEST_STRING)
-    decrypted = aes_cipher.decrypt(encrypted)
+@pytest.mark.parametrize('method', ['encrypt', 'encrypt_kdf'])
+@pytest.mark.parametrize(
+    'wrap',
+    [
+        pytest.param(lambda ct: f'{ct[:20]} {ct[20:]}', id='space, as YAML folds a wrapped value'),
+        pytest.param(lambda ct: f'{ct[:20]}\n  {ct[20:]}\n', id='newlines and indentation'),
+        pytest.param(lambda ct: f'\t{ct}\r\n', id='surrounding whitespace'),
+        pytest.param(lambda ct: f'{ct[:20]} {ct[20:]}'.encode('ascii'), id='bytes'),
+    ],
+)
+def test_decrypt_ignores_whitespace_in_ciphertext(cipher, method, wrap):
+    wrapped = wrap(getattr(cipher, method)(TEST_STRING))
 
-    assert decrypted == TEST_STRING, f'Round-trip failed: {decrypted!r}'
+    assert cipher.decrypt(wrapped) == TEST_STRING, 'a ciphertext wrapped with whitespace must still decrypt'
+    assert AESCipher.is_encrypted(wrapped), 'and must be recognised as encrypted, or the CLI would encrypt it again'
+    assert AESCipher.has_marker(wrapped), 'and must be recognised as marked'
 
 
-def test_encrypt_returns_str(aes_cipher):
-    encrypted = aes_cipher.encrypt(TEST_STRING)
+def test_decrypt_marker_only_ciphertext_reports_truncation(cipher):
+    marker_only = base64.b64encode(b'PFLX')
 
-    assume(encrypted, 'Encrypted data is empty!')
-    assume(isinstance(encrypted, str), 'Encrypted data must be a str!')
+    with pytest.raises(ValueError, match='truncated'):
+        cipher.decrypt(marker_only)
+
+    assert AESCipher.has_marker(marker_only), 'the bare marker still counts as marked'
+    assert not AESCipher.is_encrypted(marker_only), 'the bare marker is not a ciphertext'
+
+
+@pytest.mark.parametrize('stray', ['-', '!', '_', '*'])
+@pytest.mark.parametrize('source', ['current', 'legacy'])
+def test_decrypt_rejects_stray_characters_in_ciphertext(cipher, source, stray):
+    ciphertext = cipher.encrypt(TEST_STRING) if source == 'current' else TEST_CBC_CIPHERTEXT
+    damaged = f'{ciphertext[:10]}{stray}{ciphertext[10:]}'
+
+    with pytest.raises(RuntimeError, match='Unrecognized ciphertext format'):
+        cipher.decrypt(damaged)
+
+    assert not AESCipher.is_encrypted(damaged), 'what does not decrypt must not be classified as encrypted'
+    assert not AESCipher.is_legacy(damaged), 'what does not decrypt must not be classified as legacy'
+
+
+@pytest.mark.parametrize('keep', [5, 20, -1], ids=['header only', 'header and part of the nonce', 'one byte short'])
+@pytest.mark.parametrize('method', ['encrypt', 'encrypt_kdf'])
+def test_decrypt_truncated_ciphertext_raises(cipher, method, keep):
+    raw = base64.b64decode(getattr(cipher, method)(''))
+
+    with pytest.raises(ValueError, match='truncated'):
+        cipher.decrypt(base64.b64encode(raw[:keep]))
+
+
+def test_decrypt_unknown_version_raises(cipher):
+    ct = base64.b64encode(b'PFLX\x09' + os.urandom(40))
+
+    with pytest.raises(RuntimeError, match='Unknown ciphertext version'):
+        cipher.decrypt(ct)
+
+
+def test_decrypt_unrecognized_format_raises(cipher):
+    with pytest.raises(RuntimeError, match='Unrecognized ciphertext format'):
+        cipher.decrypt(base64.b64encode(b'neither-format'))
+
+
+def test_encr_kdf_roundtrip(cipher):
+    ct = cipher.encrypt_kdf(TEST_STRING)
+    assert cipher.decrypt(ct) == TEST_STRING
+
+
+def test_encr_kdf_salts_unique(cipher):
+    assert cipher.encrypt_kdf(TEST_STRING) != cipher.encrypt_kdf(TEST_STRING)
+
+
+def test_encr_kdf_tag_in_yaml_decrypts(tmp_path):
+    import os
+
+    import yaml
+
+    from pyflexcfg.components.encryption import AESCipher
+    from pyflexcfg.components.misc import Secret
+    from pyflexcfg.components.yaml_loader import YamlLoader
+
+    os.environ['PYFLEX_CFG_KEY'] = TEST_KEY
+    ct = AESCipher(TEST_KEY).encrypt_kdf(TEST_STRING)
+    yaml_text = f'secret: !encr_kdf {ct}\n'
+    data = yaml.load(yaml_text, YamlLoader)
+    assert isinstance(data['secret'], Secret)
+    assert str.__eq__(data['secret'], TEST_STRING)
+
+
+def test_encr_kdf_tamper_raises(cipher):
+    raw = bytearray(base64.b64decode(cipher.encrypt_kdf(TEST_STRING)))
+    raw[-1] ^= 0xFF
+    with pytest.raises(ValueError, match='Decryption failed'):
+        cipher.decrypt(base64.b64encode(bytes(raw)))
+
+
+def test_encr_kdf_version_byte_is_kdf(cipher):
+    raw = base64.b64decode(cipher.encrypt_kdf(TEST_STRING))
+    assert raw[:5] == b'PFLX\x02', f'unexpected header {raw[:5]!r}'
+
+
+def test_encr_nonces_unique(cipher):
+    assert cipher.encrypt(TEST_STRING) != cipher.encrypt(TEST_STRING)
+
+
+def test_encr_roundtrip(cipher):
+    ct = cipher.encrypt(TEST_STRING)
+    assert cipher.decrypt(ct) == TEST_STRING
+
+
+def test_encr_tag_in_yaml_decrypts(tmp_path):
+    import os
+
+    import yaml
+
+    from pyflexcfg.components.misc import Secret
+    from pyflexcfg.components.yaml_loader import YamlLoader
+
+    os.environ['PYFLEX_CFG_KEY'] = TEST_KEY
+    yaml_text = f'secret: !encr {TEST_ENCRYPTED_STRING}\n'
+    data = yaml.load(yaml_text, YamlLoader)
+    assert isinstance(data['secret'], Secret)
+    assert str.__eq__(data['secret'], TEST_STRING)
+
+
+def test_encr_tamper_raises(cipher):
+    raw = bytearray(base64.b64decode(cipher.encrypt(TEST_STRING)))
+    raw[-1] ^= 0xFF
+    with pytest.raises(ValueError, match='Decryption failed'):
+        cipher.decrypt(base64.b64encode(bytes(raw)))
+
+
+def test_encr_version_byte_is_fast(cipher):
+    raw = base64.b64decode(cipher.encrypt(TEST_STRING))
+    assert raw[:5] == b'PFLX\x01', f'unexpected header {raw[:5]!r}'
+
+
+def test_encrypt_returns_str(cipher):
+    ct = cipher.encrypt(TEST_STRING)
+    assume(bool(ct))
+    assume(isinstance(ct, str))
+
+
+def test_full_length_key_no_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+        AESCipher('a' * 32)
+    assert not caplog.records
+
+
+def test_has_marker_recognizes_any_marked_value(cipher):
+    assert AESCipher.has_marker(cipher.encrypt(TEST_STRING)), 'a current ciphertext carries the marker'
+    assert AESCipher.has_marker(base64.b64encode(b'PFLX\x09' + os.urandom(40))), 'so does an unknown version'
+    assert not AESCipher.has_marker(TEST_CBC_CIPHERTEXT), 'a legacy ciphertext has no marker'
+    assert not AESCipher.has_marker('plain-text!'), 'non-base64 text has no marker'
+
+
+def test_is_encrypted_recognizes_only_current_format(cipher):
+    assert AESCipher.is_encrypted(cipher.encrypt(TEST_STRING)), 'fast ciphertext must be recognized'
+    assert AESCipher.is_encrypted(cipher.encrypt_kdf(TEST_STRING)), 'KDF ciphertext must be recognized'
+    assert not AESCipher.is_encrypted(TEST_CBC_CIPHERTEXT), 'legacy ciphertext is not the current format'
+    assert not AESCipher.is_encrypted('plain-text!'), 'non-base64 text is not a ciphertext'
+
+
+@pytest.mark.parametrize('method', ['encrypt', 'encrypt_kdf'])
+def test_is_encrypted_requires_a_complete_ciphertext(cipher, method):
+    shortest = getattr(cipher, method)('')
+    raw = base64.b64decode(shortest)
+
+    assert AESCipher.is_encrypted(shortest), 'the ciphertext of an empty string is the shortest valid one'
+    for keep in (5, 20, len(raw) - 1):
+        truncated = base64.b64encode(raw[:keep])
+        assert not AESCipher.is_encrypted(truncated), f'{keep} of {len(raw)} bytes must not count as encrypted'
+        assert not AESCipher.is_kdf(truncated), f'{keep} of {len(raw)} bytes must not count as KDF-encrypted'
+        assert AESCipher.has_marker(truncated), 'a truncated ciphertext still carries the marker'
+
+
+def test_is_kdf_recognizes_only_kdf_ciphertext(cipher):
+    assert AESCipher.is_kdf(cipher.encrypt_kdf(TEST_STRING)), 'KDF ciphertext must be recognized'
+    assert not AESCipher.is_kdf(cipher.encrypt(TEST_STRING)), 'fast ciphertext is not KDF-encrypted'
+    assert not AESCipher.is_kdf(TEST_CBC_CIPHERTEXT), 'legacy ciphertext is not KDF-encrypted'
+    assert not AESCipher.is_kdf('plain-text!'), 'non-base64 text is not a ciphertext'
+
+
+def test_is_legacy_recognizes_only_cbc_shape(cipher):
+    assert AESCipher.is_legacy(TEST_CBC_CIPHERTEXT), 'v2 ciphertext must be recognized'
+    assert not AESCipher.is_legacy(cipher.encrypt('abc')), 'a 48-byte current-format ciphertext is not legacy'
+    assert not AESCipher.is_legacy('plain-text!'), 'non-base64 text is not a ciphertext'
+
+
+def test_legacy_cbc_decrypts_transparently(cipher):
+    assert cipher.decrypt(TEST_CBC_CIPHERTEXT) == TEST_STRING
+
+
+@pytest.mark.parametrize('first_iv_byte', [b'\x01', b'\x02', b'P'])
+def test_legacy_cbc_iv_resembling_a_version_byte_decrypts(cipher, first_iv_byte):
+    ct = _cbc_encrypt(TEST_STRING, first_iv_byte + os.urandom(15))
+
+    assert cipher.decrypt(ct) == TEST_STRING, f'IV starting with {first_iv_byte!r} was misrouted'
+
+
+def test_legacy_cbc_wrapped_with_whitespace_decrypts(cipher):
+    wrapped = f'{TEST_CBC_CIPHERTEXT[:16]}\n  {TEST_CBC_CIPHERTEXT[16:]}'
+
+    assert cipher.decrypt(wrapped) == TEST_STRING, 'a wrapped legacy ciphertext must still decrypt'
+    assert AESCipher.is_legacy(wrapped), 'and must be recognised as legacy, so the CLI migrates it'
+    assert cipher.decrypt_legacy(wrapped) == TEST_STRING, 'decrypt_legacy must accept the same input'
+
+
+def test_legacy_cbc_warns_to_migrate(cipher, caplog):
+    with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+        cipher.decrypt(TEST_CBC_CIPHERTEXT)
+    assert any('pyflexcfg encrypt' in r.message for r in caplog.records)
+
+
+def test_legacy_cbc_wrong_key_does_not_warn_of_success(caplog):
+    with caplog.at_level(logging.WARNING, logger='pyflexcfg'), pytest.raises(ValueError, match='Decryption failed'):
+        AESCipher('not-the-key').decrypt(TEST_CBC_CIPHERTEXT)
+
+    assert not any('decrypted successfully' in r.message for r in caplog.records), (
+        'a failed legacy decrypt must not log a success warning'
+    )
+
+
+def test_legacy_cbc_wrong_key_raises():
+    with pytest.raises(ValueError, match='Decryption failed'):
+        AESCipher('not-the-key').decrypt(TEST_CBC_CIPHERTEXT)
+
+
+def test_missing_key_env_var_raises(monkeypatch):
+    import yaml
+
+    from pyflexcfg.components.yaml_loader import YamlLoader
+
+    monkeypatch.delenv('PYFLEX_CFG_KEY', raising=False)
+    # cipher is per-instance, so a fresh yaml.load() call triggers the missing-key check
+    with pytest.raises(RuntimeError, match='PYFLEX_CFG_KEY'):
+        yaml.load('secret: !encr somevalue\n', YamlLoader)
+
+
+def test_short_key_logs_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+        AESCipher('short')
+    assert any('shorter than' in r.message for r in caplog.records)
+
+
+def _cbc_encrypt(plaintext: str, iv: bytes) -> str:
+    """Build a v2-style ciphertext: base64 of iv + AES-CBC(PKCS7(plaintext))."""
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(plaintext.encode('utf-8')) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(hashlib.sha256(TEST_KEY.encode('utf-8')).digest()), modes.CBC(iv)).encryptor()
+    return base64.b64encode(iv + encryptor.update(padded) + encryptor.finalize()).decode('ascii')

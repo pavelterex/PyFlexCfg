@@ -1,0 +1,6 @@
+service:
+  debug: true
+  timeout: 60
+
+database:
+  host: dev-host

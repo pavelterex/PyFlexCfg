@@ -1,20 +1,39 @@
 from __future__ import annotations
 
+import keyword
 import os
 import re
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from . import logger
-from .constants import NAME_REGEX_STRING, PROJECT_ROOT_PATH_ENV, ROOT_CONFIG_DIR_NAME, ROOT_CONFIG_PATH_ENV
+from .constants import (
+    ENCRYPTION_KEY_ENV_VAR,
+    NAME_REGEX_STRING,
+    PROJECT_ROOT_PATH_ENV,
+    ROOT_CONFIG_DIR_NAME,
+    ROOT_CONFIG_PATH_ENV,
+)
 from .misc import AttrDict
 from .yaml_dumper import YamlDumper
 from .yaml_loader import YamlLoader
 
 _NAME_RE = re.compile(NAME_REGEX_STRING)
+# Credentials a `.env` file may supply or repeat, but not contradict when the process already provides them.
+_PROTECTED_ENV_VARS = frozenset({ENCRYPTION_KEY_ENV_VAR, 'VAULT_ADDR', 'VAULT_TOKEN'})
+# Class attributes `reload_config` assigns that are not config values.
+_RESERVED_ATTRS = frozenset({'config_root', 'project_root'})
+# Key names that attribute access on an `AttrDict` resolves to its own method or dunder instead of the value.
+_SHADOWED_KEYS = frozenset(dir(AttrDict))
+
+# Values this module wrote into the environment from `.env` files, by normalised variable name.
+_env_file_values: dict[str, str] = {}
+# What the process provided for each of those variables before the write; `None` if it was unset.
+_env_originals: dict[str, str | None] = {}
 
 
 class HandlerMeta(type):
@@ -33,6 +52,7 @@ class HandlerMeta(type):
 
     def __new__(cls, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> HandlerMeta:
         init_attrs = AttrDict(namespace)
+        init_attrs['_handler_attrs'] = frozenset(namespace) | _RESERVED_ATTRS
 
         if not cls.config_root.exists():
             raise RuntimeError(f'Configuration root path {cls.config_root} is not found!')
@@ -41,14 +61,24 @@ class HandlerMeta(type):
         cls.project_root = cls.resolve_project_root()
         YamlLoader.project_root = cls.project_root
 
-        cls.load_config(cls.config_root, init_attrs)
+        loaded = AttrDict()
+        cls.load_config(cls.config_root, loaded)
+        cls.check_root_names(loaded, init_attrs['_handler_attrs'])
+        cls.warn_unreachable_keys(loaded)
+        init_attrs.update(loaded)
 
         return super().__new__(cls, name, bases, init_attrs)
 
     def __str__(cls) -> str:
         """Return the current configuration formatted as YAML."""
-        dct = {k: v for k, v in cls.__dict__.items() if not k.startswith('_') and not callable(getattr(cls, k))}
+        dct = {key: cls.__dict__[key] for key in cls._config_keys()}
         return yaml.dump(dct, Dumper=YamlDumper, indent=4, default_flow_style=False, sort_keys=False)
+
+    @classmethod
+    def check_root_names(cls, names: Iterable[str], handler_attrs: frozenset[str]) -> None:
+        """Raise `RuntimeError` if a top-level config name would replace a member of the handler class."""
+        if conflicts := sorted(handler_attrs.intersection(names)):
+            raise RuntimeError(f'Namespace conflict: {conflicts} would replace members of the config handler')
 
     @classmethod
     def load_config(cls, config_path: Path, dct: AttrDict) -> None:
@@ -82,21 +112,69 @@ class HandlerMeta(type):
                     cls.load_config(item, dct[item.name])
                 case _ if item.is_file() and item.suffix in {'.yml', '.yaml'}:
                     cls._load_yaml_from_file(dct, item)
-                case _ if item.is_file() and item.suffix == '.env':
+                case _ if _is_env_file(item):
                     continue  # already handled by load_env_files
                 case _:
                     logger.debug('Skipping unsupported item: %s', item)
 
     @classmethod
     def load_env_files(cls, config_path: Path) -> None:
-        """Load any `*.env` file in `config_path` (non-recursive) via dotenv."""
+        """
+        Load the `.env` file directly inside `config_path` into the environment.
+
+        A file counts when its name ends in `.env`, the bare `.env` included, and at
+        most one may exist. Its values replace variables the process already set,
+        with one exception: for the credential variables in `_PROTECTED_ENV_VARS` a
+        different value in the file is refused, so neither source silently wins.
+
+        Variables an earlier call wrote and the file no longer sets are removed
+        again, unless the process has changed them since.
+
+        Raises:
+            RuntimeError: More than one `.env` file is present, or the file gives a
+                protected variable a value that differs from the one the process
+                provides. The environment is left untouched in either case.
+        """
         if not config_path.is_dir():
             return
 
-        for item in config_path.iterdir():
-            if item.is_file() and item.suffix == '.env':
-                load_dotenv(item, override=True)
-                logger.debug('Loaded env file: %s', item)
+        env_files = sorted(item for item in config_path.iterdir() if _is_env_file(item))
+
+        if len(env_files) > 1:
+            names = ', '.join(item.name for item in env_files)
+            raise RuntimeError(
+                f'Found {len(env_files)} .env files in {config_path} ({names}). Keep exactly one: '
+                'several would load in no guaranteed order, leaving shared variables undefined.',
+            )
+
+        values = dotenv_values(env_files[0]) if env_files else {}
+        conflicts = sorted(name for name, value in values.items() if _contradicts_process(name, value))
+
+        if conflicts:
+            raise RuntimeError(
+                'Set by the process and, to a different value, in a .env file: '
+                f'{", ".join(f"{name} ({env_files[0].name})" for name in conflicts)}. '
+                'Define each of these variables in one place only.',
+            )
+
+        current = {_env_name(name) for name, value in values.items() if value is not None}
+        for name, written in list(_env_file_values.items()):
+            if name not in current:
+                # Only a value still exactly as written here is this module's to undo.
+                if os.environ.get(name) == written:
+                    _restore(name, _env_originals.get(name))
+                del _env_file_values[name]
+                _env_originals.pop(name, None)
+
+        for name, value in values.items():
+            if value is not None:
+                # Read what the process provides before overwriting it, so it can be put back later.
+                _env_originals[_env_name(name)] = _process_value(name)
+                os.environ[name] = value
+                _env_file_values[_env_name(name)] = value
+
+        if env_files:
+            logger.debug('Loaded env file: %s', env_files[0])
 
     @classmethod
     def resolve_project_root(cls, custom_root: bool = False) -> Path | None:
@@ -144,6 +222,28 @@ class HandlerMeta(type):
         return data
 
     @classmethod
+    def warn_unreachable_keys(cls, tree: Mapping[Any, Any]) -> None:
+        """
+        Log one WARNING listing every name in `tree` that dot notation cannot reach.
+
+        Covers Python keywords, non-identifiers, non-string keys and, below the top
+        level, names that resolve to a dict attribute. Top-level names become class
+        attributes, so a dict-attribute name there is reachable and not reported.
+        """
+        entries = sorted(_unreachable_entries(tree, '', top_level=True))
+
+        if entries:
+            logger.warning(
+                'These config names cannot be read with dot notation: %s. Use item access instead, for example '
+                "Cfg.app['items'] rather than Cfg.app.items; for a top-level name use getattr(Cfg, 'name').",
+                ', '.join(entries),
+            )
+
+    def _config_keys(cls) -> list[str]:
+        """Names of the class attributes that hold config values, not handler machinery."""
+        return [key for key in cls.__dict__ if not key.startswith('_') and key not in cls._handler_attrs]
+
+    @classmethod
     def _load_yaml_from_file(cls, dct: AttrDict, file: Path) -> None:
         if not _NAME_RE.match(file.stem):
             logger.debug('Skipping file %r: stem does not match NAME_REGEX_STRING', file.name)
@@ -152,8 +252,93 @@ class HandlerMeta(type):
         if file.stem in dct:
             raise RuntimeError(f'Namespace conflict: "{file.stem}" is already defined')
 
+        # Pass the open file, not its text: PyYAML quotes the offending line in errors only for str input.
         with file.open() as cfg_file:
             data = cls.to_attrdict(yaml.load(cfg_file, YamlLoader))
 
         dct[file.stem] = data
         logger.debug('Loaded configuration file: %s', file)
+
+
+def _child_path(path: str, key: Any) -> str:
+    """Extend `path` with `key`: dotted for an identifier, bracketed otherwise."""
+    if isinstance(key, str) and key.isidentifier():
+        return f'{path}.{key}' if path else key
+
+    return f'{path}[{key!r}]'
+
+
+def _contradicts_process(name: str, file_value: str | None) -> bool:
+    """Tell whether a `.env` value for a protected variable differs from one the process provides."""
+    provided = _process_value(name)
+    if _env_name(name) not in _PROTECTED_ENV_VARS or file_value is None or provided is None:
+        return False
+
+    return provided != file_value
+
+
+def _env_name(name: str) -> str:
+    """Normalise a variable name the way the OS compares it: case-insensitively on Windows."""
+    return name.upper() if os.name == 'nt' else name
+
+
+def _is_env_file(item: Path) -> bool:
+    """Tell whether `item` is a dotenv file. By name ending, since `Path('.env').suffix` is empty."""
+    return item.is_file() and item.name.endswith('.env')
+
+
+def _process_value(name: str) -> str | None:
+    """
+    Return what the process itself provides for variable `name`, or `None` if nothing.
+
+    While the environment still holds a value this module wrote from a `.env` file, that is the
+    value the variable had before the write; otherwise it is the current value.
+    """
+    key = _env_name(name)
+    current = os.environ.get(name)
+
+    if key in _env_file_values and current == _env_file_values[key]:
+        return _env_originals.get(key)
+
+    return current
+
+
+def _restore(name: str, original: str | None) -> None:
+    """Put variable `name` back to `original`, removing it when there was none."""
+    if original is None:
+        del os.environ[name]
+    else:
+        os.environ[name] = original
+
+
+def _unreachable_entries(value: Any, path: str, *, top_level: bool = False) -> Iterator[str]:
+    """Yield `path (reason)` for every key under `value` that dot notation cannot reach."""
+    match value:
+        case dict():
+            for key, item in value.items():
+                child = _child_path(path, key)
+
+                if reason := _unreachable_reason(key, top_level=top_level):
+                    yield f'{child} ({reason})'
+
+                yield from _unreachable_entries(item, child)
+        case list() | tuple():
+            for index, item in enumerate(value):
+                yield from _unreachable_entries(item, f'{path}[{index}]')
+
+
+def _unreachable_reason(key: Any, *, top_level: bool) -> str | None:
+    """Say why `key` cannot be read as an attribute, or return `None` if it can."""
+    if not isinstance(key, str):
+        return 'not a string'
+
+    if keyword.iskeyword(key):
+        return 'Python keyword'
+
+    if not key.isidentifier():
+        return 'not an identifier'
+
+    if not top_level and key in _SHADOWED_KEYS:
+        return 'dict attribute'
+
+    return None

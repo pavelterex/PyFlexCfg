@@ -1,8 +1,185 @@
 # Changelog
 
 All notable changes to PyFlexCfg are documented here. Newest entries on top.
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [3.0.0] — 2026-10-09
+
+### Breaking
+
+Every item in this section changes behaviour that worked in 2.x. Read it before upgrading.
+
+- **`!encr` ciphertext format changed (AES-CBC → AES-GCM).** New encryptions use AES-GCM and start
+  with the 4-byte marker `PFLX` plus a version byte (base64 prefix `UEZMWA`). Existing CBC
+  ciphertexts carry no marker and are **decrypted transparently**, but emit a `logging.WARNING` on
+  every load; run `pyflexcfg encrypt` to migrate all values to AES-GCM and silence the warning.
+- **Config files are parsed with PyYAML's safe loader.** 2.x used the full loader, which also
+  understands Python-specific tags. A config file using one of them (`!!python/tuple`,
+  `!!python/name:…`, `!!python/object/apply:…` and so on) no longer loads and raises a
+  `yaml.YAMLError`. Standard YAML types and all PyFlexCfg tags are unaffected. Replace such tags with
+  plain YAML; see Security below for why.
+- **Only one `.env` file is allowed in the config root.** 2.x loaded every `*.env` file it found, in
+  an order the operating system decided, so a variable defined in two files had an unpredictable
+  value. Two or more files now raise `RuntimeError` naming them, on first load, on
+  `reload_config()` and in every `pyflexcfg` command. Merge them into one file before upgrading.
+- **A file named exactly `.env` is now loaded.** 2.x matched on the file suffix, which is empty for
+  the bare `.env` name, so that file was silently ignored. It is now recognised like any other name
+  ending in `.env`, and counts towards the one-file limit. A bare `.env` in your config root that
+  never took effect will start to.
+- **A `.env` value may not contradict a process-provided `PYFLEX_CFG_KEY`.** In 2.x the file's value
+  silently won. If the process and the `.env` file now give different keys, loading raises
+  `RuntimeError` and `pyflexcfg encrypt` stops. The same rule covers the new `VAULT_ADDR` and
+  `VAULT_TOKEN`; see Security below. Other variables keep the 2.x order, where the file wins.
+- **`Cfg` loads on first access instead of when the package is imported.** `from pyflexcfg import Cfg`
+  behaves as before: it loads the config and raises on a missing config root or unsatisfied
+  `!required` key. A bare `import pyflexcfg`, or importing only `AESCipher`, `AttrDict`, `Required`
+  or `Secret`, no longer loads anything or needs a config directory; code relying on a bare
+  `import pyflexcfg` to fail fast must reference `pyflexcfg.Cfg`. The first load is guarded by a
+  lock, so threads requesting `Cfg` simultaneously load it once; `reload_config()` and runtime
+  mutation remain unsynchronised. If the first access fails (for example on a missing `!required`
+  key) and you request `Cfg` again, the config is rebuilt from disk, so nothing the failed attempt
+  applied carries over.
+- **`Cfg.reload_config(reset=True)` now drops every config value before loading**, not only
+  mapping-valued ones. Top-level scalars and lists set by the env layer, a `CFG__*` override or
+  runtime assignment no longer survive a reload after their source is gone. `reset=False` is
+  unchanged.
+- **A `::` inside a `CFG__*` value is no longer cut off.** When the text after the last `::` was not
+  a known type suffix, 2.x dropped it silently: `fe80::1` became `fe80` and `pa::ss::word` became
+  `pa::ss`. Such a value is now kept whole. As a consequence `42::yaml`, which used to become the
+  integer `42`, is now the string `42::yaml`; use a real suffix (`42::int`) to cast.
+- **`CFG__*` overrides match keys case-insensitively.** `CFG__APP__APIKEY=…` used to leave a key
+  spelled `apiKey` untouched and add a stray `apikey`; it now updates `apiKey`. An exact lowercase
+  key still wins, and two keys differing only in case with no exact match raise `RuntimeError`.
+  Keys that cannot be spelled in a variable name (`my-key`, names containing `__`, non-strings)
+  remain unaddressable; use `::yaml_m` on the parent.
+- **Ciphertexts are decoded the same way for loading and for classification.** Whitespace in a
+  ciphertext is ignored, so a value wrapped across lines loads and is recognised by
+  `AESCipher.is_encrypted()` and by `pyflexcfg encrypt`, which used to encrypt such a value a second
+  time. Any other non-base64 character now makes `decrypt()` raise
+  `RuntimeError: Unrecognized ciphertext format`; 2.x silently dropped such characters.
+- **Root-level config names that collide with handler members are rejected on every load path.**
+  A file or directory in the config root named `reload_config`, `apply_env_layer`, `update_from_env`,
+  `validate_required`, `config_root` or `project_root` now raises `RuntimeError: Namespace conflict`.
+  Previously `config_root` and `project_root` were accepted, and all six were accepted when loaded
+  through `reload_config()`, replacing the member and breaking later reloads.
+
+### Added
+
+- **`!encr_kdf` YAML tag** — AES-GCM encryption with PBKDF2HMAC (SHA-256, 480k iterations, random
+  salt) for crown-jewel secrets. `AESCipher.encrypt_kdf(plaintext)` produces the ciphertext.
+  `AESCipher.decrypt()` is self-routing: it reads the version byte after the `PFLX` marker (`\x01`
+  for fast, `\x02` for KDF) so both tags share the same decrypt path.
+- **`AESCipher.is_encrypted()`, `AESCipher.is_kdf()`, `AESCipher.is_legacy()`,
+  `AESCipher.has_marker()`, `AESCipher.decrypt_legacy()`** — classify a value as current-format,
+  PBKDF2-encrypted, v2-shaped or merely marked, and decrypt a v2 AES-CBC ciphertext explicitly.
+  `is_encrypted()` and `is_kdf()` accept only a complete ciphertext; a truncated one is rejected,
+  and `decrypt()` reports it as truncated.
+- **`PYFLEX_ENV` environment layering.** Set `PYFLEX_ENV=dev` to deep-merge `Cfg.env.dev` into the
+  root `Cfg` namespace after YAML loading. Layering order (lowest → highest): base YAML →
+  env-layer merge → `CFG__*` env-var overrides → `validate_required()`.
+  `Cfg.apply_env_layer()` can be called explicitly; it is also called automatically inside
+  `reload_config()`. Layer values are deep-copied into the root, so overrides and runtime changes
+  to the effective config never alter the definitions under `Cfg.env`. A tier may be named like a
+  dict method (`env/items.yaml`). A layer whose top-level keys are reserved — `env`, private names,
+  handler members, non-strings — is rejected with `RuntimeError` before anything is merged.
+- **`!required` YAML tag + `Cfg.validate_required()`.** Mark any scalar value `!required` to
+  declare it must be supplied at runtime. If any `!required` sentinels survive all override layers,
+  `validate_required()` raises `RuntimeError` listing every missing dotted path. Sentinels inside
+  lists are detected as well and reported with their index (`app.hosts[1]`). Only the effective
+  config is validated: the `env/` layer definitions are skipped, so a `!required` in an inactive
+  tier never blocks loading and one in the active tier is reported by its effective path. Only the
+  `env/` directory defines layers; a root-level `env.yaml` file is ordinary config and is validated.
+- **CLI — `python -m pyflexcfg` (or `pyflexcfg` after install).**
+  - `pyflexcfg show` — print the effective merged config as YAML (secrets masked).
+  - `pyflexcfg env` — print config root, project root, and active `PYFLEX_ENV`.
+  - `pyflexcfg encrypt [--dry-run]` — walk all YAML files, encrypt any plaintext `!encr` /
+    `!encr_kdf` values and migrate legacy AES-CBC ciphertexts, in-place. `--dry-run` reports without
+    writing and exits 1 if any plaintext is found (drop-in pre-commit hook). Only real YAML tags are
+    acted on, so `!encr` mentioned in a string or comment is ignored; plain, quoted and flow-style
+    values are handled, and the rest of the file is preserved byte for byte. Values it cannot safely
+    rewrite (block scalars, anchored values, tags with no value, unparsable files, legacy-shaped
+    values that do not decrypt with the current key) are left untouched, reported on stderr, and
+    make the command exit 1. Reports name the file, line, tag and key — never the value. A missing
+    or non-directory config root, or one with no YAML files, is an error (exit 1), not an empty scan.
+    A fast ciphertext under `!encr_kdf` is re-encrypted with PBKDF2 (and fails `--dry-run`); a
+    PBKDF2 ciphertext under `!encr` is left alone.
+    A value carrying the marker but truncated or of an unknown version is reported and left alone.
+    Any argument other than `--dry-run` is rejected before a file is touched. The config root's
+    `*.env` files are loaded first, so `PYFLEX_CFG_KEY` may live there.
+- **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
+  (`hvac` dependency). Path format: `mount/path#field` — the `#field` suffix selects a key from
+  the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
+  when `data/` comes directly after the mount (`mount/data/…`); any other path, including one with
+  `data` further down, is read as KV v1. The Vault client is created on the
+  first `!vault` tag hit and rebuilt whenever `VAULT_ADDR` or `VAULT_TOKEN` changes, so a reload
+  after rotating the token uses the new one. A failed fetch raises with the secret path and the
+  kind of failure only; the Vault client's message, which can hold the response body, is not
+  included or chained. Every non-null leaf fetched — in a single field, a
+  whole secret, or a nested object or list — is wrapped in `Secret`; non-string leaves are stored as
+  the `Secret` of their text.
+- **Warning for config names that dot notation cannot reach.** Python keywords (`class`, `global`),
+  non-identifiers (`my-key`), non-string keys (`1`, `true`) and nested keys named like a dict method
+  or dunder (`items`, `keys`, `__len__`) still load, but cannot be written as `Cfg.section.name`.
+  Each load now logs one WARNING listing them with their paths and the reason, and pointing to item
+  access (`Cfg.app['items']`, `getattr(Cfg, 'global')`).
+- **Path `::Type` suffixes for `CFG__*` overrides.** `::path`, `::home_dir`, `::proj_root`,
+  `::path_posix`, `::path_win`, `::pure_path`, `::pure_path_posix` and `::pure_path_win` turn an
+  override into the same path type the YAML tag of that name produces, e.g.
+  `CFG__APP__LOG_FILE=/var/log/app.log::path`.
+- **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
+  `len(PYFLEX_CFG_KEY) < 32`.
+- **`Required` class exported from the package root** (`from pyflexcfg import Required`). Useful
+  for programmatic sentinel injection and test assertions.
+
+### Changed
+
+- **`!string` composes secrets correctly.** A part tagged `!encr`, `!encr_kdf` or `!vault` used to be
+  joined as its mask, producing e.g. `'postgresql://app:********@db'`. The real value is now joined
+  in and the result is a `Secret`, so `!string ['postgresql://app:', !encr …, '@db']` yields a usable,
+  masked connection string. `!string` with no secret part still returns a plain `str`. A `!required`
+  part makes the whole composed value required, where it used to become the literal text
+  `<required>` and pass validation. The path tags (`!path`, `!home_dir`, `!proj_root` and the pure
+  variants) do the same, where a `!required` part used to raise a `TypeError` from `pathlib`.
+- **`CFG__*` overrides resolve their path by key and refuse handler names.** A path through a key
+  named like a dict method (`CFG__APP__ITEMS__SIZE=5`) used to be silently ignored and now applies;
+  `::yaml_m` onto such a key now merges instead of replacing. An override whose first component is
+  private or a handler member (`CFG__RELOAD_CONFIG=…`) used to replace that member on `Cfg` and now
+  raises `RuntimeError`.
+- **`reload_config()` keeps the environment in step with the `.env` file.** When a variable is
+  removed from the file, or the file is deleted, the next reload puts the variable back to what the
+  process itself provided, or removes it from `os.environ` if the process never set it. A dropped
+  `CFG__*` override or Vault credential stops applying, and a process-provided variable the file
+  merely repeated is kept. A variable the process changed after PyFlexCfg set it is left alone.
+
+### Security
+
+- **AES-CBC replaced with AES-GCM.** GCM provides authenticated encryption — any ciphertext
+  tampering raises `ValueError` at decrypt time rather than silently producing corrupted plaintext.
+  The old CBC implementation had no authentication tag.
+- **Config files can no longer execute Python.** The YAML loader is now based on PyYAML's
+  `SafeLoader`. With the full loader used in 2.x, a value tagged `!!python/object/apply:…` in any
+  config file ran arbitrary code while the config was loading, so write access to the config
+  directory meant code execution in the application.
+- **A `.env` file can no longer silently replace process-provided credentials.** For
+  `PYFLEX_CFG_KEY`, `VAULT_ADDR` and `VAULT_TOKEN`, a `.env` value that differs from one the process
+  provides now raises `RuntimeError` at load (and stops `pyflexcfg encrypt`), instead of winning.
+  This closes two cases: a stale file replacing an injected token, and a file redirecting a valid
+  token to another Vault address. Identical values, a file supplying a variable the process lacks,
+  and rotating a file-provided value on reload all still work. For every other variable the `.env`
+  file still overrides the process environment, as in 2.x; that order is now documented.
+- **Failed `::Type` conversions no longer expose the value.** `update_from_env()` used to raise
+  `Value 'hunter2' could not be cast …` with the original exception chained. The error now names
+  the variable and target type only, e.g. `CFG__DB__PASSWORD: value could not be cast as 'int'
+  (ValueError)`, and the underlying exception is not chained.
+- **Skipped-override debug log no longer prints a config value.** When a `CFG__*` path ran through
+  a scalar or list (`CFG__DB__PASSWORD__X=…`), the "cannot assign" debug message included that
+  value's `repr`. It now logs only the value's type.
+- **Debug log no longer leaks env-var values on unknown `::Type` suffix.** When `update_from_env()`
+  encounters an unrecognised type suffix (e.g. `CFG__X=secret::nosuchtype`, or a secret that simply
+  contains `::`, such as `abc::hunter2`), the log message now names the variable only. Neither the
+  text before `::` nor the text after it is logged, since either may be part of a secret.
+
+---
 
 ## [2.0.0] — 2026-05-25
 
@@ -99,5 +276,6 @@ Pre-changelog era. See `git log` for granular history. Notable features in 1.0.0
 - `NAME_REGEX_STRING` validation for loaded names.
 - Centralized `logger` at `pyflexcfg.components.logger`.
 
+[3.0.0]: https://github.com/pavelterex/PyFlexCfg/releases/tag/v3.0.0
 [2.0.0]: https://github.com/pavelterex/PyFlexCfg/releases/tag/v2.0.0
 [1.0.0]: https://github.com/pavelterex/PyFlexCfg/releases/tag/v1.0.0
