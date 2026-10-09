@@ -177,6 +177,86 @@ Any `*.env` file found directly inside the config root (non-recursive) is loaded
 `PYFLEX_CFG_KEY`, `CFG__…` overrides, and other environment variables without touching the shell.
 `.env` files are not parsed as YAML and not exposed as `Cfg.<name>` attributes.
 
+> **Warning: keep exactly one `.env` file in the config root.**
+>
+> PyFlexCfg loads every `*.env` file it finds there, in whatever order the operating system lists
+> them. That order is not guaranteed and can differ between machines, so if two files define the
+> same variable, which value you end up with is undefined — including for `PYFLEX_CFG_KEY`,
+> `VAULT_ADDR` and `VAULT_TOKEN`. PyFlexCfg does not stop or pick a winner for you.
+>
+> What it does do is log a WARNING on every load that finds more than one file, naming the files and
+> the variables defined in more than one of them (names only, never values):
+>
+> ```text
+> Found 2 .env files in /app/config (app.env, backup.env). Keep exactly one: they load in no
+> guaranteed order, so a variable defined in several of them gets an undefined value. Defined in
+> more than one: SHARED.
+> ```
+>
+> Like all of PyFlexCfg's log messages, it is visible only if your application has logging
+> configured (see [Logging](#logging)).
+>
+> `pyflexcfg encrypt` is stricter: it refuses to run when the config root holds more than one `.env`
+> file, with or without `--dry-run`, because encrypting with an ill-defined key is hard to undo.
+>
+> A second file left behind by accident (`old.env`, `backup.env`, `local.env`) is loaded just like
+> the intended one. Put all variables in a single file, and remove or rename any other file ending
+> in `.env`. If you need per-environment values, use `PYFLEX_ENV` layers or set the variables in the
+> process environment instead of adding more `.env` files.
+
+### Order of precedence
+
+When the same setting is given in more than one place, the place lower in this table wins:
+
+| Priority | Source | Notes |
+|---|---|---|
+| 1 (lowest) | YAML files | The base configuration |
+| 2 | The active `PYFLEX_ENV` layer | Deep-merged over the base YAML |
+| 3 | `CFG__*` variables set by the process | Shell, container, orchestrator |
+| 4 (highest) | `CFG__*` variables in a `.env` file | Replace a process variable of the same name |
+
+**A `.env` file overrides the process environment.** If `PYFLEX_ENV`, a `CFG__*` override or any
+other variable is set both by the process and in a `.env` file in the config root, the value from
+the file is used. The file's values are written into `os.environ`, so they are also what the rest of
+your application sees.
+
+**Three credential variables are the exception: `PYFLEX_CFG_KEY`, `VAULT_ADDR` and `VAULT_TOKEN`.**
+For these PyFlexCfg refuses to choose. If the process provides one of them and a `.env` file gives
+it a *different* value, loading stops:
+
+```text
+RuntimeError: Set by the process and, to a different value, in a .env file: VAULT_ADDR (vault.env).
+Define each of these variables in one place only.
+```
+
+This protects against a stale file silently replacing an injected `VAULT_TOKEN`, a file pointing a
+valid token at another `VAULT_ADDR`, and `pyflexcfg encrypt` encrypting with a different key than
+the one your process uses. The rule in full:
+
+| The process provides the variable | A `.env` file sets it | Result |
+|---|---|---|
+| no | yes | The file's value is used |
+| yes | no | The process value is used |
+| yes | yes, same value | Fine — nothing to resolve |
+| yes | yes, different value | `RuntimeError`; nothing from any `.env` file is applied |
+
+A value that came from a `.env` file in the first place may change in the file later:
+`Cfg.reload_config()` picks up a rotated `VAULT_TOKEN` without complaint. The error is only about a
+file contradicting something the process itself provides.
+
+For all other variables PyFlexCfg does not detect or resolve a conflict; the file simply wins.
+Keeping the sources consistent is up to you:
+
+- Define each variable in one place only. In a deployment where the orchestrator injects
+  credentials, do not ship a `.env` file that also sets them.
+- Do not commit `.env` files holding secrets, and do not copy a development `.env` into a
+  production config root.
+- Use a single `.env` file (see the warning above). With two or more, a variable defined in both
+  gets an undefined value.
+
+`PYFLEX_CFG_ROOT_PATH` is the one setting a `.env` file cannot provide, because the config root has
+to be known before the files inside it can be found.
+
 ---
 
 ## Environment-variable overrides
@@ -258,10 +338,15 @@ PYFLEX_ENV=dev python app.py
 
 After `Cfg` loads: `Cfg.database.host == 'dev-db'`, `Cfg.database.port == 5432` (preserved by deep merge).
 
-Priority order (lowest → highest): base YAML → env-layer merge → `CFG__*` env-var overrides.
+Priority order (lowest → highest): base YAML → env-layer merge → `CFG__*` env-var overrides. See
+[Order of precedence](#order-of-precedence) for the full table, including `.env` files.
 
 Layer values are copied into the root, not shared with it. A `CFG__*` override or a change you make
 to the effective config never alters the definition under `Cfg.env.<tier>`.
+
+Tiers are defined only by files in the `env/` directory. A single `config/env.yaml` file is ordinary
+config, reachable as `Cfg.env`: it is never merged by `PYFLEX_ENV`, and a `!required` inside it is
+validated like any other.
 
 A tier file may be named anything that is a valid config name, including words such as `items` or
 `keys`. Its top-level keys, however, become attributes of `Cfg`, so a few names are rejected with a
@@ -506,7 +591,10 @@ Install the optional extra:
 pip install "pyflexcfg[vault]"
 ```
 
-Set `VAULT_ADDR` and `VAULT_TOKEN`, then reference secrets directly in YAML:
+Set `VAULT_ADDR` and `VAULT_TOKEN`, then reference secrets directly in YAML. Set them in one place
+only: if the process provides one of them and a `.env` file in the config root gives it a different
+value, loading raises an error instead of picking one (see
+[Order of precedence](#order-of-precedence)).
 
 ```yaml
 db_password: !vault secret/data/myapp/db#password   # KV v2 — field
@@ -556,8 +644,10 @@ pyflexcfg encrypt --dry-run
 
 All commands read `PYFLEX_CFG_ROOT_PATH` and `PYFLEX_CFG_KEY` from the environment. Every command,
 `encrypt` included, first loads the `*.env` files in the config root, so a `PYFLEX_CFG_KEY` kept
-there is picked up; as in normal loading, a value from a `.env` file replaces one already set in
-the environment. `encrypt` exits 1
+there is picked up. If the process also sets `PYFLEX_CFG_KEY` to a different value, the command
+stops with an error and encrypts nothing (see [Order of precedence](#order-of-precedence)). It also
+stops, naming the files, if the config root contains more than one `.env` file.
+`encrypt` exits 1
 with an error if the config root is missing, is not a directory, or contains no `.yaml` / `.yml`
 files, so a misconfigured pre-commit hook fails instead of passing silently. It also rejects any
 argument other than `--dry-run` before touching a file, so a mistyped flag such as `--dryrun` cannot
@@ -604,8 +694,8 @@ validation).
 ## Logging
 
 PyFlexCfg logs to the `pyflexcfg` logger: load details at DEBUG, and a few things you should act on
-at WARNING — a legacy ciphertext that needs migrating, a short encryption key, and config names that
-dot notation cannot reach (see
+at WARNING — a legacy ciphertext that needs migrating, a short encryption key, more than one `.env`
+file in the config root, and config names that dot notation cannot reach (see
 [Names that dot notation cannot reach](#names-that-dot-notation-cannot-reach)).
 
 Like most libraries, PyFlexCfg attaches no output handler of its own, so **none of these messages

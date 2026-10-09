@@ -179,16 +179,36 @@ def test_vault_provider_singleton(vault_env, mock_hvac):
     assert mock_hvac.Client.call_count == 1
 
 
-def test_vault_reload_uses_token_rotated_in_env_file(vault_env, mock_hvac, tmp_path):
+def test_vault_reload_uses_token_rotated_in_env_file(monkeypatch, vault_env, mock_hvac, tmp_path):
     mock_hvac.Client.return_value.secrets.kv.v1.read_secret.return_value = {'data': {'token': 'api-token'}}
-    get_vault_provider()
-    (tmp_path / 'vault.env').write_text('VAULT_TOKEN=rotated-token\n', encoding='utf-8')
+    monkeypatch.delenv('VAULT_TOKEN')  # the token comes from the .env file only
     (tmp_path / 'app.yaml').write_text('api: !vault secret/myapp#token\n', encoding='utf-8')
-
+    (tmp_path / 'vault.env').write_text('VAULT_TOKEN=first-token\n', encoding='utf-8')
     Cfg.reload_config(config_path=tmp_path)
+    mock_hvac.Client.assert_called_with(url='http://vault:8200', token='first-token')
+
+    (tmp_path / 'vault.env').write_text('VAULT_TOKEN=rotated-token\n', encoding='utf-8')
+    Cfg.reload_config()
 
     assert Cfg.app.api == 'api-token', 'the Vault value must still be fetched'
     mock_hvac.Client.assert_called_with(url='http://vault:8200', token='rotated-token')
+
+
+@pytest.mark.parametrize(
+    'name, value',
+    [
+        pytest.param('VAULT_ADDR', 'http://elsewhere:8200', id='address redirected'),
+        pytest.param('VAULT_TOKEN', 'stale-token', id='token replaced'),
+    ],
+)
+def test_vault_reload_with_env_file_contradicting_process_refused(vault_env, mock_hvac, tmp_path, name, value):
+    (tmp_path / 'app.yaml').write_text('api: !vault secret/myapp#token\n', encoding='utf-8')
+    (tmp_path / 'vault.env').write_text(f'{name}={value}\n', encoding='utf-8')
+
+    with pytest.raises(RuntimeError, match=name):
+        Cfg.reload_config(config_path=tmp_path)
+
+    mock_hvac.Client.assert_not_called()
 
 
 def test_vault_returns_secret_instance(vault_env, mock_hvac):

@@ -25,6 +25,16 @@ def test_decrypt_accepts_str(cipher):
     assert cipher.decrypt(TEST_ENCRYPTED_STRING) == TEST_STRING
 
 
+def test_decrypt_marker_only_ciphertext_reports_truncation(cipher):
+    marker_only = base64.b64encode(b'PFLX')
+
+    with pytest.raises(ValueError, match='truncated'):
+        cipher.decrypt(marker_only)
+
+    assert AESCipher.has_marker(marker_only), 'the bare marker still counts as marked'
+    assert not AESCipher.is_encrypted(marker_only), 'the bare marker is not a ciphertext'
+
+
 @pytest.mark.parametrize('keep', [5, 20, -1], ids=['header only', 'header and part of the nonce', 'one byte short'])
 @pytest.mark.parametrize('method', ['encrypt', 'encrypt_kdf'])
 def test_decrypt_truncated_ciphertext_raises(cipher, method, keep):

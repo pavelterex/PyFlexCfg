@@ -58,8 +58,25 @@ def _cmd_encrypt(*, dry_run: bool) -> None:
         print(f'Error: config root {config_root} is not a directory.', file=sys.stderr)
         sys.exit(1)
 
-    HandlerMeta.load_env_files(config_root)
+    env_files = sorted(item.name for item in config_root.iterdir() if item.is_file() and item.suffix == '.env')
+
+    if len(env_files) > 1:
+        # Stricter than loading, which only warns: encrypting with an ill-defined key is hard to undo.
+        print(
+            f'Error: found {len(env_files)} .env files in config root {config_root} ({", ".join(env_files)}). '
+            'Keep exactly one: with several, the encryption key is not well defined.',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        HandlerMeta.load_env_files(config_root)
+    except RuntimeError as exc:
+        print(f'Error: {exc}', file=sys.stderr)
+        sys.exit(1)
+
     key = os.getenv(_KEY_ENV)
+
     if not key:
         print(f'Error: {_KEY_ENV} is not set.', file=sys.stderr)
         sys.exit(1)

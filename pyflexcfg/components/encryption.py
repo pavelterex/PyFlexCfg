@@ -77,7 +77,8 @@ class AESCipher(ICipher):
         raw = base64.b64decode(ciphertext)
         header, body = raw[:_HEADER_SIZE], raw[_HEADER_SIZE:]
 
-        if len(raw) < _MIN_SIZES.get(header, 0):
+        # A marked value must hold at least its header, and a known format its salt, nonce and tag as well.
+        if raw.startswith(_MAGIC) and len(raw) < _MIN_SIZES.get(header, _HEADER_SIZE):
             raise ValueError('Decryption failed: ciphertext is truncated')
 
         match header:

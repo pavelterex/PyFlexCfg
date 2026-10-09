@@ -42,6 +42,21 @@ def test_required_in_active_layer_unsatisfied_reports_effective_path(monkeypatch
     assert 'env.prd' not in msg, f'the layer definition itself must not be reported, got {msg!r}'
 
 
+@pytest.mark.parametrize('active', ['dev', None], ids=['PYFLEX_ENV set', 'PYFLEX_ENV unset'])
+def test_required_in_env_yaml_file_is_validated(monkeypatch, tmp_path, active):
+    (tmp_path / 'env.yaml').write_text('name: local\ndev:\n  password: !required\n', encoding='utf-8')
+    (tmp_path / 'database.yaml').write_text('host: base-db\n', encoding='utf-8')
+    if active:
+        monkeypatch.setenv('PYFLEX_ENV', active)
+    else:
+        monkeypatch.delenv('PYFLEX_ENV', raising=False)
+
+    with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+
+    assert "'env.dev.password'" in str(exc_info.value), f'env.yaml is ordinary config, got {exc_info.value}'
+
+
 @pytest.mark.parametrize('active', ['dev', None], ids=['another layer active', 'no layer active'])
 def test_required_in_inactive_layer_does_not_block(monkeypatch, tmp_path, active):
     _write_layered_config(tmp_path)

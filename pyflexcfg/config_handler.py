@@ -133,6 +133,7 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         keys into the root namespace.  Runs before :meth:`update_from_env` so
         ``CFG__*`` overrides always take priority over the env layer.
         No-ops silently when ``PYFLEX_ENV`` is unset or the named layer is not found.
+        Layers come only from the ``env/`` directory; an ``env.yaml`` file is ordinary config.
 
         Raises:
             RuntimeError: The layer has a top-level key that is not a string, is
@@ -144,8 +145,8 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             return
 
         # Mapping lookups throughout: attribute access would resolve names such as `items` to dict methods.
-        layers = cls.__dict__.get(_LAYERS_KEY)
-        env_obj = layers.get(env_name) if isinstance(layers, AttrDict) else None
+        layers = cls._layers()
+        env_obj = layers.get(env_name) if layers is not None else None
 
         if not isinstance(env_obj, AttrDict):
             logger.debug('PYFLEX_ENV=%r: no config found at Cfg.env.%s', env_name, env_name)
@@ -283,18 +284,22 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
 
         Called after :meth:`apply_env_layer` and :meth:`update_from_env` so all
         override layers have had a chance to satisfy required keys. Only the
-        effective config is checked: the ``env`` namespace of layer definitions
-        is skipped, since the active layer is already merged into the root.
+        effective config is checked: the layer definitions loaded from the
+        ``env/`` directory are skipped, since the active layer is already
+        merged into the root. An ``env.yaml`` file is validated like any other.
 
         Raises:
             RuntimeError: Lists every dotted path that still holds a
                 :class:`Required` sentinel.
         """
+        # Layer definitions are not effective config; the active one is already merged into the root.
+        skipped = _LAYERS_KEY if cls._layers() is not None else None
         missing: list[str] = []
+
         for key in cls._config_keys():
-            # Layer definitions are not effective config; the active one is already merged into the root.
-            if key != _LAYERS_KEY:
+            if key != skipped:
                 _collect_required(cls.__dict__[key], key, missing)
+
         if missing:
             raise RuntimeError(f'Required config values are missing: {missing}')
 
@@ -344,3 +349,13 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                 continue
 
         return src_value, False
+
+    @classmethod
+    def _layers(cls) -> AttrDict | None:
+        """Return the layer definitions: the `env` namespace, but only when it is the `env/` directory."""
+        layers = cls.__dict__.get(_LAYERS_KEY)
+
+        if isinstance(layers, AttrDict) and (cls.config_root / _LAYERS_KEY).is_dir():
+            return layers
+
+        return None

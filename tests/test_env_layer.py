@@ -40,6 +40,17 @@ def test_env_layer_deep_merge_preserves_siblings(monkeypatch, env_config):
     assert Cfg.database.name == 'mydb'
 
 
+def test_env_layer_ignores_env_yaml_file(monkeypatch, tmp_path):
+    (tmp_path / 'database.yaml').write_text('host: base-host\n', encoding='utf-8')
+    (tmp_path / 'env.yaml').write_text('dev:\n  database:\n    host: dev-host\n', encoding='utf-8')
+    monkeypatch.setenv('PYFLEX_ENV', 'dev')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.database.host == 'base-host', 'only the env/ directory defines layers; env.yaml is ordinary config'
+    assert Cfg.env.dev.database.host == 'dev-host', 'env.yaml content must still load as ordinary config'
+
+
 def test_env_layer_merges_into_root(monkeypatch, env_config):
     monkeypatch.setenv('PYFLEX_ENV', 'dev')
     Cfg.reload_config(config_path=_ENV_LAYER_CONFIG)

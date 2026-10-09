@@ -70,6 +70,32 @@ optional HashiCorp Vault integration.
 Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  →  validate_required()
 ```
 
+Precedence when a setting is given in several places, lowest to highest:
+
+```
+YAML files  <  active PYFLEX_ENV layer  <  CFG__* set by the process  <  CFG__* in a .env file
+```
+
+`*.env` files in the config root are loaded first and **override the process environment** for the
+variables they define (`CFG__*`, `PYFLEX_ENV`, …); the values are written into `os.environ`.
+
+**Exception — `PYFLEX_CFG_KEY`, `VAULT_ADDR`, `VAULT_TOKEN`:** if the process provides one and a
+`.env` file gives it a *different* value, loading (and `pyflexcfg encrypt`) raises `RuntimeError`
+naming the variable and file, and applies nothing from any `.env`. Same value in both places is
+fine; a file may supply one the process lacks; a value that originally came from a `.env` may be
+rotated there and picked up by `reload_config()`.
+
+For other variables PyFlexCfg does not detect conflicts: define each variable in one place.
+
+**Use exactly one `.env` file in the config root.** Every `*.env` file there is loaded, in
+unspecified directory order; a variable defined in two files gets an undefined value, even for the
+three credential variables. Loading does not stop; it logs one WARNING naming the files and the
+variables defined in more than one. `pyflexcfg encrypt` is stricter and exits 1 when it finds more
+than one `.env` file. Never suggest splitting settings across several `.env` files,
+and flag stray ones (`old.env`, `backup.env`).
+
+`PYFLEX_CFG_ROOT_PATH` cannot come from a `.env` file.
+
 ---
 
 ## Critical gotchas
@@ -90,7 +116,9 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
   missing key is accessed. Sentinels inside lists are found too and reported with an index
   (`app.hosts[1]`, `app.servers[0].host`); satisfy them by replacing the whole list, e.g.
   `CFG__APP__HOSTS='[a, b]::yaml_r'`.
-- **`!required` is validated on the effective config only.** The `Cfg.env` layer definitions are
+- **Layers come only from the `env/` directory.** A root-level `env.yaml` file is ordinary config:
+  `PYFLEX_ENV` never merges it and its `!required` values are validated normally.
+- **`!required` is validated on the effective config only.** The `env/` layer definitions are
   skipped: a sentinel in `env/prd.yaml` counts only once `PYFLEX_ENV=prd` merges it into the root,
   and is then reported as `database.password`, not `env.prd.database.password`. Sentinels in inactive
   tiers never block loading, and are not caught if code reads `Cfg.env.<tier>` directly.
@@ -123,8 +151,9 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
   `apply_env_layer`, `update_from_env`, `validate_required`, `config_root`, `project_root`); loading
   raises `RuntimeError: Namespace conflict`.
 - **PyFlexCfg's log messages are invisible by default.** The `pyflexcfg` logger has only a
-  `NullHandler`; warnings (legacy ciphertext, short key, unreachable names) appear only if the
-  application configures logging, e.g. `logging.basicConfig()` before importing `Cfg`.
+  `NullHandler`; warnings (legacy ciphertext, short key, several `.env` files, unreachable names)
+  appear only if the application configures logging, e.g. `logging.basicConfig()` before importing
+  `Cfg`.
 - **`CFG__*` path parts match keys case-insensitively.** An exact lowercase key wins; otherwise the
   one key differing only in case is updated and keeps its spelling (`CFG__APP__APIKEY` → `apiKey`).
   Two case-variants with no exact match (`Host`, `HOST`) raise `RuntimeError`. An unmatched last

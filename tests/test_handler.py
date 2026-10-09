@@ -188,6 +188,108 @@ class TestTmpPath:
 
         assert os.getenv('AUTOLOAD_PROBE') == 'hello', '.env file should populate environment'
 
+    def test_env_file_conflict_after_process_changes_credential(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('VAULT_TOKEN', raising=False)
+        (tmp_path / 'vault.env').write_text('VAULT_TOKEN=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+        assert os.environ['VAULT_TOKEN'] == 'from-file', 'the file must supply the value first'
+
+        monkeypatch.setenv('VAULT_TOKEN', 'set-by-the-application')
+
+        with pytest.raises(RuntimeError, match='VAULT_TOKEN'):
+            Cfg.reload_config()
+        assert os.environ['VAULT_TOKEN'] == 'set-by-the-application', 'the process value must be left in place'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN'])
+    def test_env_file_conflicting_with_process_credential_raises(self, tmp_path: Path, monkeypatch, name):
+        monkeypatch.setenv(name, 'process-value')
+        monkeypatch.setenv('HARMLESS_PROBE', 'process-value')
+        (tmp_path / 'settings.env').write_text(f'HARMLESS_PROBE=file-value\n{name}=file-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with pytest.raises(RuntimeError) as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+        msg = str(exc_info.value)
+
+        assert name in msg, f'the error must name the variable, got {msg!r}'
+        assert 'settings.env' in msg, f'the error must name the file, got {msg!r}'
+        assert 'process-value' not in msg, 'the error must not contain the process value'
+        assert 'file-value' not in msg, 'the error must not contain the file value'
+        assert os.environ[name] == 'process-value', 'the process value must be left in place'
+        assert os.environ['HARMLESS_PROBE'] == 'process-value', 'no file value may be applied when loading is refused'
+
+    @pytest.mark.parametrize('name', ['PYFLEX_CFG_KEY', 'VAULT_ADDR', 'VAULT_TOKEN'])
+    def test_env_file_credential_equal_to_process_value_accepted(self, tmp_path: Path, monkeypatch, name):
+        monkeypatch.setenv(name, 'same-value')
+        (tmp_path / 'settings.env').write_text(f'{name}=same-value\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert Cfg.general.key == 'value', 'identical values in both places are not a conflict'
+
+    def test_env_file_credential_rotated_between_reloads(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('VAULT_TOKEN', raising=False)
+        _write(tmp_path / 'general.yaml', 'key: value')
+        (tmp_path / 'vault.env').write_text('VAULT_TOKEN=first-token\n')
+        Cfg.reload_config(config_path=tmp_path)
+        assert os.environ['VAULT_TOKEN'] == 'first-token', 'a file may supply a credential the process lacks'
+
+        (tmp_path / 'vault.env').write_text('VAULT_TOKEN=rotated-token\n')
+        Cfg.reload_config()
+
+        assert os.environ['VAULT_TOKEN'] == 'rotated-token', 'a value that came from the file may be rotated in it'
+
+    def test_env_file_selects_env_layer(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('PYFLEX_ENV', raising=False)
+        (tmp_path / 'settings.env').write_text('PYFLEX_ENV=dev\n')
+        _write(tmp_path / 'database.yaml', 'host: base-host')
+        (tmp_path / 'env').mkdir()
+        _write(tmp_path / 'env' / 'dev.yaml', 'database:\n  host: dev-host')
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert Cfg.database.host == 'dev-host', 'PYFLEX_ENV set in a .env file must select the layer'
+
+    @pytest.mark.parametrize('with_env_file', [True, False], ids=['.env present', 'no .env'])
+    def test_env_file_value_overrides_process_variable(self, tmp_path: Path, monkeypatch, with_env_file):
+        """Documented precedence: YAML < process environment < .env file."""
+        monkeypatch.setenv('PRECEDENCE_PROBE', 'from-process')
+        monkeypatch.setenv('CFG__GENERAL__HOST', 'from-process')
+        _write(tmp_path / 'general.yaml', 'host: from-yaml')
+        if with_env_file:
+            (tmp_path / 'overrides.env').write_text('PRECEDENCE_PROBE=from-file\nCFG__GENERAL__HOST=from-file\n')
+        expected = 'from-file' if with_env_file else 'from-process'
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert os.getenv('PRECEDENCE_PROBE') == expected, f'got {os.getenv("PRECEDENCE_PROBE")!r}'
+        assert Cfg.general.host == expected, f'the override must follow the same precedence, got {Cfg.general.host!r}'
+
+    @pytest.mark.parametrize('extra_file', [True, False], ids=['two .env files', 'one .env file'])
+    def test_env_files_more_than_one_warned(self, tmp_path: Path, monkeypatch, caplog, extra_file):
+        for name in ('ENV_PROBE_SHARED', 'ENV_PROBE_ONLY_A', 'ENV_PROBE_ONLY_B'):
+            monkeypatch.delenv(name, raising=False)
+        (tmp_path / 'app.env').write_text('ENV_PROBE_SHARED=secret-a\nENV_PROBE_ONLY_A=1\n')
+        if extra_file:
+            (tmp_path / 'backup.env').write_text('ENV_PROBE_SHARED=secret-b\nENV_PROBE_ONLY_B=1\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+            Cfg.reload_config(config_path=tmp_path)
+        warnings = [r.getMessage() for r in caplog.records if '.env files' in r.getMessage()]
+
+        if not extra_file:
+            assert not warnings, f'a single .env file must not be warned about, got {warnings!r}'
+            return
+
+        assert len(warnings) == 1, f'expected one warning, got {warnings!r}'
+        for expected in ('app.env', 'backup.env', 'ENV_PROBE_SHARED'):
+            assert expected in warnings[0], f'{expected!r} is missing from the warning: {warnings[0]!r}'
+        for unexpected in ('ENV_PROBE_ONLY_A', 'ENV_PROBE_ONLY_B', 'secret-a', 'secret-b'):
+            assert unexpected not in warnings[0], f'{unexpected!r} must not be in the warning: {warnings[0]!r}'
+
     def test_loaded_yaml_dict_becomes_attrdict(self, tmp_path: Path):
         _write(tmp_path / 'general.yaml', 'nested:\n  key: value\n  inner:\n    deep: 42')
         Cfg.reload_config(config_path=tmp_path)

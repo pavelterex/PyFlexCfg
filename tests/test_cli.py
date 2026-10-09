@@ -78,6 +78,20 @@ def test_encrypt_dry_run_unsupported_scalar_exits_nonzero(tmp_path, value):
     assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'file must stay untouched'
 
 
+@pytest.mark.parametrize('args', [('encrypt',), ('encrypt', '--dry-run')], ids=['write', 'dry-run'])
+def test_encrypt_env_file_key_contradicting_process_refused(tmp_path, args):
+    original = 'secret: !encr myvalue\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    (tmp_path / 'secrets.env').write_text('PYFLEX_CFG_KEY=key-from-file\n', encoding='utf-8')
+    result = _run(*args, config_root=tmp_path)
+
+    assert result.returncode == 1, f'two different keys must stop the command, got stdout {result.stdout!r}'
+    assert 'PYFLEX_CFG_KEY' in result.stderr, f'got {result.stderr!r}'
+    assert 'Traceback' not in result.stderr, 'the conflict must be reported as a clean error'
+    assert 'key-from-file' not in result.stdout + result.stderr, 'the key must not be printed'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'nothing may be encrypted'
+
+
 def test_encrypt_fast_ciphertext_under_kdf_tag_wrong_key_left_untouched(tmp_path):
     original = f'secret: !encr_kdf {TEST_ENCRYPTED_STRING}\n'
     (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
@@ -228,6 +242,23 @@ def test_encrypt_rewrites_plaintext_value(tmp_path):
     updated = (tmp_path / 'app.yaml').read_text(encoding='utf-8')
     assert 'myplainvalue' not in updated
     assert '!encr ' in updated
+
+
+@pytest.mark.parametrize('args', [('encrypt',), ('encrypt', '--dry-run')], ids=['write', 'dry-run'])
+@pytest.mark.parametrize('second', ['PYFLEX_CFG_KEY=another-key\n', 'UNRELATED=1\n'], ids=['key twice', 'key once'])
+def test_encrypt_several_env_files_refused(tmp_path, second, args):
+    original = 'secret: !encr myvalue\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    (tmp_path / 'app.env').write_text(f'PYFLEX_CFG_KEY={TEST_KEY}\n', encoding='utf-8')
+    (tmp_path / 'backup.env').write_text(second, encoding='utf-8')
+    result = _run(*args, config_root=tmp_path, cfg_key=None)
+
+    assert result.returncode == 1, f'more than one .env file must stop the command, got stdout {result.stdout!r}'
+    for name in ('app.env', 'backup.env'):
+        assert name in result.stderr, f'{name} must be named in the error, got {result.stderr!r}'
+    assert 'Traceback' not in result.stderr, 'the refusal must be a clean error'
+    assert 'another-key' not in result.stdout + result.stderr, 'no key may be printed'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'nothing may be encrypted'
 
 
 def test_encrypt_skips_already_encrypted(tmp_path):

@@ -37,7 +37,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `validate_required()` raises `RuntimeError` listing every missing dotted path. Sentinels inside
   lists are detected as well and reported with their index (`app.hosts[1]`). Only the effective
   config is validated: the `env/` layer definitions are skipped, so a `!required` in an inactive
-  tier never blocks loading and one in the active tier is reported by its effective path.
+  tier never blocks loading and one in the active tier is reported by its effective path. Only the
+  `env/` directory defines layers; a root-level `env.yaml` file is ordinary config and is validated.
 - **CLI — `python -m pyflexcfg` (or `pyflexcfg` after install).**
   - `pyflexcfg show` — print the effective merged config as YAML (secrets masked).
   - `pyflexcfg env` — print config root, project root, and active `PYFLEX_ENV`.
@@ -70,6 +71,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or dunder (`items`, `keys`, `__len__`) still load, but cannot be written as `Cfg.section.name`.
   Each load now logs one WARNING listing them with their paths and the reason, and pointing to item
   access (`Cfg.app['items']`, `getattr(Cfg, 'global')`).
+- **Warning for more than one `.env` file.** Every `*.env` file in the config root is loaded, in no
+  guaranteed order. When there is more than one, each load now logs a WARNING naming the files and
+  the variables defined in more than one of them. `pyflexcfg encrypt` refuses to run in that case.
 - **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
   `len(PYFLEX_CFG_KEY) < 32`.
 - **`Required` class exported from the package root** (`from pyflexcfg import Required`). Useful
@@ -113,6 +117,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **AES-CBC replaced with AES-GCM.** GCM provides authenticated encryption — any ciphertext
   tampering raises `ValueError` at decrypt time rather than silently producing corrupted plaintext.
   The old CBC implementation had no authentication tag.
+- **A `.env` file can no longer silently replace process-provided credentials.** For
+  `PYFLEX_CFG_KEY`, `VAULT_ADDR` and `VAULT_TOKEN`, a `.env` value that differs from one the process
+  provides now raises `RuntimeError` at load (and stops `pyflexcfg encrypt`), instead of winning.
+  This closes two cases: a stale file replacing an injected token, and a file redirecting a valid
+  token to another Vault address. Identical values, a file supplying a variable the process lacks,
+  and rotating a file-provided value on reload all still work. For every other variable the `.env`
+  file still overrides the process environment, as in 2.x; that order is now documented.
 - **Failed `::Type` conversions no longer expose the value.** `update_from_env()` used to raise
   `Value 'hunter2' could not be cast …` with the original exception chained. The error now names
   the variable and target type only, e.g. `CFG__DB__PASSWORD: value could not be cast as 'int'

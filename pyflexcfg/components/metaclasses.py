@@ -3,24 +3,36 @@ from __future__ import annotations
 import keyword
 import os
 import re
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from . import logger
-from .constants import NAME_REGEX_STRING, PROJECT_ROOT_PATH_ENV, ROOT_CONFIG_DIR_NAME, ROOT_CONFIG_PATH_ENV
+from .constants import (
+    ENCRYPTION_KEY_ENV_VAR,
+    NAME_REGEX_STRING,
+    PROJECT_ROOT_PATH_ENV,
+    ROOT_CONFIG_DIR_NAME,
+    ROOT_CONFIG_PATH_ENV,
+)
 from .misc import AttrDict
 from .yaml_dumper import YamlDumper
 from .yaml_loader import YamlLoader
 
 _NAME_RE = re.compile(NAME_REGEX_STRING)
+# Credentials a `.env` file may supply or repeat, but not contradict when the process already provides them.
+_PROTECTED_ENV_VARS = frozenset({ENCRYPTION_KEY_ENV_VAR, 'VAULT_ADDR', 'VAULT_TOKEN'})
 # Class attributes `reload_config` assigns that are not config values.
 _RESERVED_ATTRS = frozenset({'config_root', 'project_root'})
 # Key names that attribute access on an `AttrDict` resolves to its own method or dunder instead of the value.
 _SHADOWED_KEYS = frozenset(dir(AttrDict))
+
+# Values this module wrote into the environment from `.env` files, by normalised variable name.
+_env_file_values: dict[str, str] = {}
 
 
 class HandlerMeta(type):
@@ -106,14 +118,56 @@ class HandlerMeta(type):
 
     @classmethod
     def load_env_files(cls, config_path: Path) -> None:
-        """Load any `*.env` file in `config_path` (non-recursive) via dotenv."""
+        """
+        Load every `*.env` file in `config_path` (non-recursive) into the environment.
+
+        A file value replaces a variable the process already set, with one exception:
+        for the credential variables in `_PROTECTED_ENV_VARS` a different value in a
+        file is refused, so neither source silently wins. More than one file is
+        allowed but logged as a WARNING, since their load order is not defined.
+
+        Raises:
+            RuntimeError: A file gives a protected variable a value that differs from
+                the one the process provides. No file is applied in that case.
+        """
         if not config_path.is_dir():
             return
 
-        for item in config_path.iterdir():
-            if item.is_file() and item.suffix == '.env':
-                load_dotenv(item, override=True)
-                logger.debug('Loaded env file: %s', item)
+        files = {
+            item: dotenv_values(item) for item in config_path.iterdir() if item.is_file() and item.suffix == '.env'
+        }
+
+        if len(files) > 1:
+            counts = Counter(_env_name(name) for values in files.values() for name in values)
+            repeated = sorted(name for name, count in counts.items() if count > 1)
+            logger.warning(
+                'Found %d .env files in %s (%s). Keep exactly one: they load in no guaranteed order, so a variable '
+                'defined in several of them gets an undefined value. Defined in more than one: %s.',
+                len(files),
+                config_path,
+                ', '.join(sorted(item.name for item in files)),
+                ', '.join(repeated) or 'none',
+            )
+
+        conflicts = sorted(
+            f'{name} ({item.name})'
+            for item, values in files.items()
+            for name, value in values.items()
+            if _contradicts_process(name, value)
+        )
+
+        if conflicts:
+            raise RuntimeError(
+                'Set by the process and, to a different value, in a .env file: '
+                f'{", ".join(conflicts)}. Define each of these variables in one place only.',
+            )
+
+        for item, values in files.items():
+            for name, value in values.items():
+                if value is not None:
+                    os.environ[name] = value
+                    _env_file_values[_env_name(name)] = value
+            logger.debug('Loaded env file: %s', item)
 
     @classmethod
     def resolve_project_root(cls, custom_root: bool = False) -> Path | None:
@@ -205,6 +259,21 @@ def _child_path(path: str, key: Any) -> str:
         return f'{path}.{key}' if path else key
 
     return f'{path}[{key!r}]'
+
+
+def _contradicts_process(name: str, file_value: str | None) -> bool:
+    """Tell whether a `.env` value for a protected variable differs from one the process provides."""
+    current = os.environ.get(name)
+    if _env_name(name) not in _PROTECTED_ENV_VARS or file_value is None or current is None:
+        return False
+
+    # A value this module wrote from an earlier `.env` load is the file's own and may change.
+    return current != file_value and _env_file_values.get(_env_name(name)) != current
+
+
+def _env_name(name: str) -> str:
+    """Normalise a variable name the way the OS compares it: case-insensitively on Windows."""
+    return name.upper() if os.name == 'nt' else name
 
 
 def _unreachable_entries(value: Any, path: str, *, top_level: bool = False) -> Iterator[str]:
