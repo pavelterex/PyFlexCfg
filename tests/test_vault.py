@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 import pyflexcfg.components.providers as providers_mod
+from pyflexcfg import Cfg
 from pyflexcfg.components.misc import AttrDict, Secret
 from pyflexcfg.components.providers import VaultProvider, get_vault_provider
 from pyflexcfg.components.yaml_dumper import YamlDumper
@@ -139,12 +140,41 @@ def test_vault_path_not_found_raises(vault_env, mock_hvac):
         provider.fetch('secret/missing#key')
 
 
+@pytest.mark.parametrize(
+    'name, value',
+    [
+        pytest.param('VAULT_TOKEN', 'rotated-token', id='token'),
+        pytest.param('VAULT_ADDR', 'http://other-vault:8200', id='address'),
+    ],
+)
+def test_vault_provider_rebuilt_when_credentials_change(monkeypatch, vault_env, mock_hvac, name, value):
+    first = get_vault_provider()
+    monkeypatch.setenv(name, value)
+    second = get_vault_provider()
+    expected = {'url': 'http://vault:8200', 'token': 'test-token'} | {'url' if name == 'VAULT_ADDR' else 'token': value}
+
+    assert second is not first, f'a changed {name} must not reuse the cached client'
+    mock_hvac.Client.assert_called_with(**expected)
+
+
 def test_vault_provider_singleton(vault_env, mock_hvac):
     """get_vault_provider() returns the same instance on repeated calls."""
     p1 = get_vault_provider()
     p2 = get_vault_provider()
     assert p1 is p2
     assert mock_hvac.Client.call_count == 1
+
+
+def test_vault_reload_uses_token_rotated_in_env_file(vault_env, mock_hvac, tmp_path):
+    mock_hvac.Client.return_value.secrets.kv.v1.read_secret.return_value = {'data': {'token': 'api-token'}}
+    get_vault_provider()
+    (tmp_path / 'vault.env').write_text('VAULT_TOKEN=rotated-token\n', encoding='utf-8')
+    (tmp_path / 'app.yaml').write_text('api: !vault secret/myapp#token\n', encoding='utf-8')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.api == 'api-token', 'the Vault value must still be fetched'
+    mock_hvac.Client.assert_called_with(url='http://vault:8200', token='rotated-token')
 
 
 def test_vault_returns_secret_instance(vault_env, mock_hvac):

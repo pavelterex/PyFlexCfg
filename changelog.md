@@ -30,7 +30,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`!required` YAML tag + `Cfg.validate_required()`.** Mark any scalar value `!required` to
   declare it must be supplied at runtime. If any `!required` sentinels survive all override layers,
   `validate_required()` raises `RuntimeError` listing every missing dotted path. Sentinels inside
-  lists are detected as well and reported with their index (`app.hosts[1]`).
+  lists are detected as well and reported with their index (`app.hosts[1]`). Only the effective
+  config is validated: the `env/` layer definitions are skipped, so a `!required` in an inactive
+  tier never blocks loading and one in the active tier is reported by its effective path.
 - **CLI — `python -m pyflexcfg` (or `pyflexcfg` after install).**
   - `pyflexcfg show` — print the effective merged config as YAML (secrets masked).
   - `pyflexcfg env` — print config root, project root, and active `PYFLEX_ENV`.
@@ -50,8 +52,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
   (`hvac` dependency). Path format: `mount/path#field` — the `#field` suffix selects a key from
   the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
-  when the path contains `/data/`; otherwise KV v1 is assumed. The `VaultProvider` singleton is
-  initialised on the first `!vault` tag hit. Every non-null leaf fetched — in a single field, a
+  when the path contains `/data/`; otherwise KV v1 is assumed. The Vault client is created on the
+  first `!vault` tag hit and rebuilt whenever `VAULT_ADDR` or `VAULT_TOKEN` changes, so a reload
+  after rotating the token uses the new one. Every non-null leaf fetched — in a single field, a
   whole secret, or a nested object or list — is wrapped in `Secret`; non-string leaves are stored as
   the `Secret` of their text.
 - **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if

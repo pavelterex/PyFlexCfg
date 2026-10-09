@@ -89,6 +89,12 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
   missing key is accessed. Sentinels inside lists are found too and reported with an index
   (`app.hosts[1]`, `app.servers[0].host`); satisfy them by replacing the whole list, e.g.
   `CFG__APP__HOSTS='[a, b]::yaml_r'`.
+- **`!required` is validated on the effective config only.** The `Cfg.env` layer definitions are
+  skipped: a sentinel in `env/prd.yaml` counts only once `PYFLEX_ENV=prd` merges it into the root,
+  and is then reported as `database.password`, not `env.prd.database.password`. Sentinels in inactive
+  tiers never block loading, and are not caught if code reads `Cfg.env.<tier>` directly.
+- **The Vault client follows `VAULT_ADDR` / `VAULT_TOKEN`.** It is cached, and rebuilt when either
+  value changes, so a reload after rotating the token uses the new one.
 - **`AttrDict` inherits from `dict`.** Use `Cfg.section.key` (attribute) or `Cfg.section['key']`
   (item) — both work. Call `.as_dict()` before passing to code that expects a plain `dict`.
 - **Directory and file names** under the config root must match `^[a-z][a-z0-9_]{0,28}[a-z0-9]$`.

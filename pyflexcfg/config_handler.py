@@ -14,6 +14,8 @@ from .components.yaml_loader import YamlLoader
 # Suffixes that opt into dict-merge behavior when both env value and existing
 # config value are dicts. Every other suffix (and auto-coercion) replaces the
 # existing value outright.
+# Top-level namespace holding the `PYFLEX_ENV` layer definitions (`config/env/<tier>.yaml`).
+_LAYERS_KEY = 'env'
 _MERGE_SUFFIXES = {'yaml_m'}
 
 
@@ -82,7 +84,7 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         env_name = os.getenv(ACTIVE_ENV_VAR, '').lower()
         if not env_name:
             return
-        env_obj = getattr(getattr(cls, 'env', None), env_name, None)
+        env_obj = getattr(getattr(cls, _LAYERS_KEY, None), env_name, None)
         if not isinstance(env_obj, AttrDict):
             logger.debug('PYFLEX_ENV=%r: no config found at Cfg.env.%s', env_name, env_name)
             return
@@ -200,7 +202,9 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         Raise if any ``!required``-tagged config values were not supplied.
 
         Called after :meth:`apply_env_layer` and :meth:`update_from_env` so all
-        override layers have had a chance to satisfy required keys.
+        override layers have had a chance to satisfy required keys. Only the
+        effective config is checked: the ``env`` namespace of layer definitions
+        is skipped, since the active layer is already merged into the root.
 
         Raises:
             RuntimeError: Lists every dotted path that still holds a
@@ -208,7 +212,9 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         """
         missing: list[str] = []
         for key in cls._config_keys():
-            _collect_required(cls.__dict__[key], key, missing)
+            # Layer definitions are not effective config; the active one is already merged into the root.
+            if key != _LAYERS_KEY:
+                _collect_required(cls.__dict__[key], key, missing)
         if missing:
             raise RuntimeError(f'Required config values are missing: {missing}')
 

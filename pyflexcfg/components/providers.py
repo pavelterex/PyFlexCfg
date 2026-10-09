@@ -25,6 +25,7 @@ class VaultProvider(SecretProvider):
         except ImportError:
             raise RuntimeError('hvac is required for the !vault tag. Install it with: pip install "pyflexcfg[vault]"')
 
+        self.credentials = (addr, token)
         self._client = hvac.Client(url=addr, token=token)
 
     def fetch(self, path: str) -> Any:
@@ -66,9 +67,13 @@ _vault_provider: VaultProvider | None = None
 
 
 def get_vault_provider() -> VaultProvider:
+    """Return the cached provider, rebuilding it when `VAULT_ADDR` / `VAULT_TOKEN` have changed."""
     global _vault_provider
-    if _vault_provider is None:
+    credentials = (os.getenv('VAULT_ADDR'), os.getenv('VAULT_TOKEN'))
+
+    if _vault_provider is None or _vault_provider.credentials != credentials:
         _vault_provider = VaultProvider()
+
     return _vault_provider
 
 

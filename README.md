@@ -207,6 +207,13 @@ PyFlexCfg raises `RuntimeError` when `Cfg` loads (after all overrides run) if an
 RuntimeError: Required config values are missing: ['database.host', 'database.password']
 ```
 
+Only the effective configuration is validated. The layer definitions under `env/` are not checked
+themselves: a `!required` in `env/prd.yaml` matters only when `PYFLEX_ENV=prd` merges it into the
+root, where it is reported by its effective path (`database.password`, not
+`env.prd.database.password`) and can be satisfied like any other key. A `!required` in a tier that
+is not active never blocks loading. The flip side: if you read `Cfg.env.<tier>` directly instead of
+activating it, a sentinel there is not caught.
+
 Satisfy required keys with env-var overrides or the env layer before `Cfg` is first imported:
 
 ```shell
@@ -431,7 +438,9 @@ holds a nested object or list — becomes a `Secret`, so `repr(Cfg)` and `pyflex
 so convert explicitly where you need the type: `int(Cfg.db.port)`. Do not use `bool()` for that — any
 non-empty string is truthy, so compare instead: `Cfg.db.ssl == 'True'`. `null` values stay `None`.
 
-- The `VaultProvider` singleton is instantiated on the first `!vault` tag hit, not at import.
+- The Vault client is created on the first `!vault` tag hit, not at import, and then reused. It is
+  rebuilt whenever `VAULT_ADDR` or `VAULT_TOKEN` differs from the values it was created with, so
+  `Cfg.reload_config()` picks up a rotated token — including one changed in a `.env` file.
 - Missing `VAULT_ADDR` or `VAULT_TOKEN` raises `RuntimeError` immediately.
 - Missing `hvac` package raises `RuntimeError` with an install hint.
 - Network errors or missing secret paths raise `RuntimeError` — startup failure is intentional.

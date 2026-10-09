@@ -19,6 +19,42 @@ def test_required_error_names_dotted_path(monkeypatch):
     assert 'server.host' in msg or 'database.host' in msg
 
 
+def test_required_in_active_layer_satisfied_by_override(monkeypatch, tmp_path):
+    _write_layered_config(tmp_path)
+    monkeypatch.setenv('PYFLEX_ENV', 'prd')
+    monkeypatch.setenv('CFG__DATABASE__PASSWORD', 'from-env-var')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.database.password == 'from-env-var', f'got {Cfg.database.password!r}'
+    assert Cfg.database.host == 'prd-db', 'the active layer must still be merged'
+
+
+def test_required_in_active_layer_unsatisfied_reports_effective_path(monkeypatch, tmp_path):
+    _write_layered_config(tmp_path)
+    monkeypatch.setenv('PYFLEX_ENV', 'prd')
+
+    with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+    msg = str(exc_info.value)
+
+    assert "'database.password'" in msg, f'the effective path must be reported, got {msg!r}'
+    assert 'env.prd' not in msg, f'the layer definition itself must not be reported, got {msg!r}'
+
+
+@pytest.mark.parametrize('active', ['dev', None], ids=['another layer active', 'no layer active'])
+def test_required_in_inactive_layer_does_not_block(monkeypatch, tmp_path, active):
+    _write_layered_config(tmp_path)
+    if active:
+        monkeypatch.setenv('PYFLEX_ENV', active)
+    else:
+        monkeypatch.delenv('PYFLEX_ENV', raising=False)
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.database.host == ('dev-db' if active else 'base-db'), f'got {Cfg.database.host!r}'
+
+
 def test_required_in_sequence_reported_with_index(tmp_path):
     (tmp_path / 'app.yaml').write_text(_SEQUENCE_YAML, encoding='utf-8')
 
@@ -106,6 +142,14 @@ def test_validate_required_explicit_call(monkeypatch):
     Cfg.app.server.host = Required()
     with pytest.raises(RuntimeError, match='Required config values are missing'):
         Cfg.validate_required()
+
+
+def _write_layered_config(root: Path) -> None:
+    """Base config plus a `dev` layer and a `prd` layer that marks the password `!required`."""
+    (root / 'env').mkdir()
+    (root / 'database.yaml').write_text('host: base-db\n', encoding='utf-8')
+    (root / 'env' / 'dev.yaml').write_text('database:\n  host: dev-db\n', encoding='utf-8')
+    (root / 'env' / 'prd.yaml').write_text('database:\n  host: prd-db\n  password: !required\n', encoding='utf-8')
 
 
 def _load_required(monkeypatch, **env_overrides):

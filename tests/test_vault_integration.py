@@ -5,9 +5,9 @@ Run with: pytest -m integration
 Skip automatically when Docker is unavailable.
 """
 
+import http.client
 import subprocess
 import time
-import urllib.error
 import urllib.request
 
 import pytest
@@ -20,6 +20,7 @@ from pyflexcfg.components.yaml_loader import YamlLoader
 
 pytestmark = pytest.mark.integration
 
+_HTTP_OK = 200
 _VAULT_ADDR = 'http://127.0.0.1:8200'
 _VAULT_TOKEN = 'test-token'
 
@@ -122,6 +123,16 @@ def test_missing_path_raises(vault_env):
         provider.fetch('secret/data/doesnotexist#key')
 
 
+def test_provider_follows_changed_token(monkeypatch, vault_env):
+    path = 'secret/data/myapp/db#password'
+    assert providers_mod.get_vault_provider().fetch(path) == 'hunter2', 'the valid token must work first'
+
+    monkeypatch.setenv('VAULT_TOKEN', 'no-longer-valid')
+
+    with pytest.raises(RuntimeError, match='Failed to fetch'):
+        providers_mod.get_vault_provider().fetch(path)
+
+
 def test_provider_singleton(vault_env):
     p1 = providers_mod.get_vault_provider()
     p2 = providers_mod.get_vault_provider()
@@ -179,10 +190,10 @@ def _vault(container_id: str, *args: str) -> None:
 
 
 def _vault_ready() -> bool:
+    """Tell whether Vault reports itself initialized, unsealed and active."""
     try:
-        urllib.request.urlopen(f'{_VAULT_ADDR}/v1/sys/health', timeout=2)
-        return True
-    except urllib.error.HTTPError:
-        return True  # any HTTP response means the server is up
-    except Exception:
+        # /sys/health answers 200 only in that state; 501 and 503 (uninitialized, sealed) raise HTTPError.
+        with urllib.request.urlopen(f'{_VAULT_ADDR}/v1/sys/health', timeout=2) as response:
+            return response.status == _HTTP_OK
+    except (OSError, http.client.HTTPException):
         return False
