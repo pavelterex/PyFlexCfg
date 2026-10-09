@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _CBC_BLOCK_SIZE = 16
 _GCM_NONCE_SIZE = 12
+_GCM_TAG_SIZE = 16
 _KDF_ITERATIONS = 480_000
 _KDF_SALT_SIZE = 16
 _MAGIC = b'PFLX'
@@ -29,6 +30,11 @@ class _V:
 
 
 _HEADER_SIZE = len(_V.FAST)
+# Shortest valid ciphertext per format: what encrypting an empty string produces.
+_MIN_SIZES = {
+    _V.FAST: _HEADER_SIZE + _GCM_NONCE_SIZE + _GCM_TAG_SIZE,
+    _V.KDF: _HEADER_SIZE + _KDF_SALT_SIZE + _GCM_NONCE_SIZE + _GCM_TAG_SIZE,
+}
 
 
 class AESCipher(ICipher):
@@ -70,6 +76,9 @@ class AESCipher(ICipher):
         """
         raw = base64.b64decode(ciphertext)
         header, body = raw[:_HEADER_SIZE], raw[_HEADER_SIZE:]
+
+        if len(raw) < _MIN_SIZES.get(header, 0):
+            raise ValueError('Decryption failed: ciphertext is truncated')
 
         match header:
             case _V.FAST:
@@ -163,14 +172,20 @@ class AESCipher(ICipher):
         return base64.b64encode(_V.KDF + salt + nonce + ct).decode('ascii')
 
     @staticmethod
+    def has_marker(value: bytes | str) -> bool:
+        """Tell whether `value` carries the ``PFLX`` marker, even if truncated or of an unknown version."""
+        return _decode_strict(value).startswith(_MAGIC)
+
+    @staticmethod
     def is_encrypted(value: bytes | str) -> bool:
-        """Tell whether `value` is a ciphertext in the current AES-GCM format."""
-        return _decode_strict(value)[:_HEADER_SIZE] in (_V.FAST, _V.KDF)
+        """Tell whether `value` is a complete ciphertext in the current AES-GCM format."""
+        return _is_complete(_decode_strict(value))
 
     @staticmethod
     def is_kdf(value: bytes | str) -> bool:
-        """Tell whether `value` is a current-format ciphertext made by :meth:`encrypt_kdf`."""
-        return _decode_strict(value)[:_HEADER_SIZE] == _V.KDF
+        """Tell whether `value` is a complete current-format ciphertext made by :meth:`encrypt_kdf`."""
+        raw = _decode_strict(value)
+        return raw.startswith(_V.KDF) and _is_complete(raw)
 
     @staticmethod
     def is_legacy(value: bytes | str) -> bool:
@@ -193,6 +208,12 @@ def _decode_strict(value: bytes | str) -> bytes:
         return base64.b64decode(value, validate=True)
     except ValueError:
         return b''
+
+
+def _is_complete(raw: bytes) -> bool:
+    """Tell whether `raw` has a known header and at least that format's salt, nonce and GCM tag."""
+    min_size = _MIN_SIZES.get(raw[:_HEADER_SIZE])
+    return min_size is not None and len(raw) >= min_size
 
 
 def _has_cbc_shape(raw: bytes) -> bool:

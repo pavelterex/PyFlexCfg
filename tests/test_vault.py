@@ -1,6 +1,7 @@
 """Tests for HashiCorp Vault integration (Feature 6). All Vault calls are mocked."""
 
 import sys
+import traceback
 from unittest.mock import MagicMock
 
 import pytest
@@ -43,6 +44,19 @@ def mock_hvac(monkeypatch):
 def vault_env(monkeypatch):
     monkeypatch.setenv('VAULT_ADDR', 'http://vault:8200')
     monkeypatch.setenv('VAULT_TOKEN', 'test-token')
+
+
+def test_vault_fetch_failure_omits_backend_error_text(vault_env, mock_hvac):
+    backend_error = Exception('{"data": {"password": "hunter2"}}, on get http://vault:8200/v1/secret/missing')
+    mock_hvac.Client.return_value.secrets.kv.v1.read_secret.side_effect = backend_error
+
+    with pytest.raises(RuntimeError, match='Failed to fetch Vault secret') as exc_info:
+        VaultProvider().fetch('secret/missing#key')
+    rendered = ''.join(traceback.format_exception(exc_info.value))
+
+    assert 'hunter2' not in rendered, 'the backend error text leaked into the error or its traceback'
+    assert "'secret/missing'" in str(exc_info.value), 'the error must still name the secret path'
+    assert '(Exception)' in str(exc_info.value), 'the error must name the kind of backend failure'
 
 
 def test_vault_fetch_no_field_returns_attrdict(vault_env, mock_hvac):

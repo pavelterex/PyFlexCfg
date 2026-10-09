@@ -1,5 +1,6 @@
 import os
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ def _deep_merge(target: AttrDict, source: AttrDict) -> None:
         if isinstance(existing, AttrDict) and isinstance(value, AttrDict):
             _deep_merge(existing, value)
         else:
-            target[key] = value
+            target[key] = deepcopy(value)
 
 
 def _parse_yaml(value: str) -> Any:
@@ -93,7 +94,8 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             if isinstance(existing, AttrDict) and isinstance(value, AttrDict):
                 _deep_merge(existing, value)
             else:
-                setattr(cls, key, value)
+                # Copied so that later changes to the effective config leave the layer definition intact.
+                setattr(cls, key, deepcopy(value))
 
     @classmethod
     def reload_config(

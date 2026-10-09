@@ -1,5 +1,6 @@
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -101,6 +102,27 @@ def _cmd_encrypt(*, dry_run: bool) -> None:
         print('All !encr / !encr_kdf values are already encrypted.')
 
 
+def _decrypt_or_report(
+    decrypt: Callable[[str], str],
+    value: str,
+    report: _Report,
+    *,
+    found: tuple[list[str], str],
+    failed: str,
+) -> str | None:
+    """Decrypt `value`; record `found` on success, or `failed` as unresolved and return `None`."""
+    try:
+        plaintext = decrypt(value)
+    except ValueError:
+        report.unresolved.append(failed)
+        return None
+
+    bucket, message = found
+    bucket.append(message)
+
+    return plaintext
+
+
 def _find_edits(text: str, rel: str, cipher: AESCipher, report: _Report) -> list[tuple[int, int, str, str]]:
     """
     Locate `!encr` / `!encr_kdf` tagged scalars in `text` that need (re-)encrypting.
@@ -150,26 +172,31 @@ def _plaintext_to_encrypt(tag: str, value: str, where: str, cipher: AESCipher, r
         # A KDF ciphertext under `!encr` is stronger than asked for and is left alone.
         if tag != '!encr_kdf' or AESCipher.is_kdf(value):
             return None
-        try:
-            plaintext = cipher.decrypt(value)
-        except ValueError:
-            report.unresolved.append(f'{where} is encrypted without PBKDF2 and does not decrypt with {_KEY_ENV}')
-            return None
-        report.weak.append(f'{where} is encrypted without the PBKDF2 its tag requires')
-        return plaintext
+        return _decrypt_or_report(
+            cipher.decrypt,
+            value,
+            report,
+            found=(report.weak, f'{where} is encrypted without the PBKDF2 its tag requires'),
+            failed=f'{where} is encrypted without PBKDF2 and does not decrypt with {_KEY_ENV}',
+        )
 
-    if not AESCipher.is_legacy(value):
-        report.plaintext.append(f'{where} is plaintext')
-        return value
-
-    try:
-        plaintext = cipher.decrypt_legacy(value)
-    except ValueError:
-        # Either a legacy ciphertext under another key or base64-looking plaintext.
-        report.unresolved.append(f'{where} looks like a legacy ciphertext but does not decrypt with {_KEY_ENV}')
+    if AESCipher.has_marker(value):
+        # Not a complete, known ciphertext, yet clearly not plaintext either: encrypting it would bury it.
+        report.unresolved.append(f'{where} carries the PFLX marker but is truncated or of an unknown version')
         return None
-    report.legacy.append(f'{where} is a legacy AES-CBC ciphertext')
-    return plaintext
+
+    if AESCipher.is_legacy(value):
+        # A failure here means a legacy ciphertext under another key, or base64-looking plaintext.
+        return _decrypt_or_report(
+            cipher.decrypt_legacy,
+            value,
+            report,
+            found=(report.legacy, f'{where} is a legacy AES-CBC ciphertext'),
+            failed=f'{where} looks like a legacy ciphertext but does not decrypt with {_KEY_ENV}',
+        )
+
+    report.plaintext.append(f'{where} is plaintext')
+    return value
 
 
 if __name__ == '__main__':

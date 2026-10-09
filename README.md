@@ -185,6 +185,9 @@ After `Cfg` loads: `Cfg.database.host == 'dev-db'`, `Cfg.database.port == 5432` 
 
 Priority order (lowest → highest): base YAML → env-layer merge → `CFG__*` env-var overrides.
 
+Layer values are copied into the root, not shared with it. A `CFG__*` override or a change you make
+to the effective config never alters the definition under `Cfg.env.<tier>`.
+
 If `PYFLEX_ENV` names a tier that doesn't exist, PyFlexCfg logs a DEBUG message and continues
 without error — a typo fails silently by design so that missing envs don't crash production.
 
@@ -309,7 +312,9 @@ db_pass: !encr_kdf UEZMWA...
 
 Every ciphertext starts with the 4-byte marker `PFLX` followed by a version byte, so in base64 it
 always begins with `UEZMWA`. The marker is how PyFlexCfg tells its own ciphertexts apart from v2
-ones and from plaintext; `AESCipher.is_encrypted(value)` performs the same check.
+ones and from plaintext. `AESCipher.is_encrypted(value)` performs the same check and also requires
+the value to be complete — long enough to hold its nonce and authentication tag — so a truncated
+ciphertext is not mistaken for an encrypted value.
 
 At load time each value decrypts into a `Secret`. `Secret` is a `str` subclass — its `repr`,
 `str()`, f-strings, and `%`-format arguments all output `********`. Equality and slicing work
@@ -443,7 +448,10 @@ non-empty string is truthy, so compare instead: `Cfg.db.ssl == 'True'`. `null` v
   `Cfg.reload_config()` picks up a rotated token — including one changed in a `.env` file.
 - Missing `VAULT_ADDR` or `VAULT_TOKEN` raises `RuntimeError` immediately.
 - Missing `hvac` package raises `RuntimeError` with an install hint.
-- Network errors or missing secret paths raise `RuntimeError` — startup failure is intentional.
+- Network errors or missing secret paths raise `RuntimeError` — startup failure is intentional. The
+  error gives the secret path and the kind of failure, e.g.
+  `Failed to fetch Vault secret at 'secret/myapp/db' (Forbidden)`. The Vault client's own message is
+  left out because it can contain the raw response body.
 
 ---
 
@@ -487,7 +495,8 @@ value with PBKDF2, and `--dry-run` reports it and exits 1. The reverse — a PBK
 `!encr` — is stronger than required and is left alone.
 
 What it will not rewrite: a block scalar (`|` or `>`), a value carrying an anchor or alias, a tag
-with no value, a legacy-looking value it cannot decrypt, and any file the tokenizer rejects. Each is
+with no value, a legacy-looking value it cannot decrypt, a value that carries the `PFLX` marker but
+is truncated or of an unknown version, and any file the tokenizer rejects. Each is
 reported on stderr and makes the command exit 1 (with or without `--dry-run`), so encrypt those
 manually. Reports give the file, line, tag and key — never the value.
 

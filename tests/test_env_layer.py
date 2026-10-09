@@ -77,6 +77,30 @@ def test_env_layer_overridden_by_cfg_env_var(monkeypatch, env_config):
     assert Cfg.database.host == 'override-host'
 
 
+def test_env_layer_values_copied_not_aliased(monkeypatch, tmp_path):
+    (tmp_path / 'env').mkdir()
+    (tmp_path / 'app.yaml').write_text('host: base\n', encoding='utf-8')
+    layer = 'app:\n  nested:\n    key: from-file\nextras:\n  flag: true\nreplicas: [a, b]\n'
+    (tmp_path / 'env' / 'dev.yaml').write_text(layer, encoding='utf-8')
+    monkeypatch.setenv('PYFLEX_ENV', 'dev')
+    monkeypatch.setenv('CFG__EXTRAS__FLAG', 'false')
+    Cfg.reload_config(config_path=tmp_path)
+
+    Cfg.replicas.append('c')
+    Cfg.app.nested.key = 'changed at runtime'
+
+    assert Cfg.extras.flag is False, 'the override must apply to the effective config'
+    assert Cfg.env.dev.extras.flag is True, 'a CFG__ override changed the layer definition'
+    assert Cfg.env.dev.replicas == ['a', 'b'], 'mutating an effective list changed the layer definition'
+    assert Cfg.env.dev.app.nested.key == 'from-file', 'mutating an effective mapping changed the layer definition'
+
+    monkeypatch.delenv('CFG__EXTRAS__FLAG')
+    Cfg.apply_env_layer()
+
+    assert Cfg.extras.flag is True, 're-applying the layer must restore the file-defined value'
+    assert Cfg.replicas == ['a', 'b'], 're-applying the layer must restore the file-defined list'
+
+
 @pytest.mark.parametrize('next_env', ['prd', None], ids=['switch to prd', 'unset'])
 def test_env_layer_values_dropped_on_reload_after_switch(monkeypatch, tmp_path, next_env):
     (tmp_path / 'env').mkdir()

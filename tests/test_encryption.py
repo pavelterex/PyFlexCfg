@@ -25,6 +25,15 @@ def test_decrypt_accepts_str(cipher):
     assert cipher.decrypt(TEST_ENCRYPTED_STRING) == TEST_STRING
 
 
+@pytest.mark.parametrize('keep', [5, 20, -1], ids=['header only', 'header and part of the nonce', 'one byte short'])
+@pytest.mark.parametrize('method', ['encrypt', 'encrypt_kdf'])
+def test_decrypt_truncated_ciphertext_raises(cipher, method, keep):
+    raw = base64.b64decode(getattr(cipher, method)(''))
+
+    with pytest.raises(ValueError, match='truncated'):
+        cipher.decrypt(base64.b64encode(raw[:keep]))
+
+
 def test_decrypt_unknown_version_raises(cipher):
     ct = base64.b64encode(b'PFLX\x09' + os.urandom(40))
 
@@ -123,11 +132,31 @@ def test_full_length_key_no_warning(caplog):
     assert not caplog.records
 
 
+def test_has_marker_recognizes_any_marked_value(cipher):
+    assert AESCipher.has_marker(cipher.encrypt(TEST_STRING)), 'a current ciphertext carries the marker'
+    assert AESCipher.has_marker(base64.b64encode(b'PFLX\x09' + os.urandom(40))), 'so does an unknown version'
+    assert not AESCipher.has_marker(TEST_CBC_CIPHERTEXT), 'a legacy ciphertext has no marker'
+    assert not AESCipher.has_marker('plain-text!'), 'non-base64 text has no marker'
+
+
 def test_is_encrypted_recognizes_only_current_format(cipher):
     assert AESCipher.is_encrypted(cipher.encrypt(TEST_STRING)), 'fast ciphertext must be recognized'
     assert AESCipher.is_encrypted(cipher.encrypt_kdf(TEST_STRING)), 'KDF ciphertext must be recognized'
     assert not AESCipher.is_encrypted(TEST_CBC_CIPHERTEXT), 'legacy ciphertext is not the current format'
     assert not AESCipher.is_encrypted('plain-text!'), 'non-base64 text is not a ciphertext'
+
+
+@pytest.mark.parametrize('method', ['encrypt', 'encrypt_kdf'])
+def test_is_encrypted_requires_a_complete_ciphertext(cipher, method):
+    shortest = getattr(cipher, method)('')
+    raw = base64.b64decode(shortest)
+
+    assert AESCipher.is_encrypted(shortest), 'the ciphertext of an empty string is the shortest valid one'
+    for keep in (5, 20, len(raw) - 1):
+        truncated = base64.b64encode(raw[:keep])
+        assert not AESCipher.is_encrypted(truncated), f'{keep} of {len(raw)} bytes must not count as encrypted'
+        assert not AESCipher.is_kdf(truncated), f'{keep} of {len(raw)} bytes must not count as KDF-encrypted'
+        assert AESCipher.has_marker(truncated), 'a truncated ciphertext still carries the marker'
 
 
 def test_is_kdf_recognizes_only_kdf_ciphertext(cipher):

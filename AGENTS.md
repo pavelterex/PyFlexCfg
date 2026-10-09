@@ -22,8 +22,9 @@ optional HashiCorp Vault integration.
 | `AESCipher.encrypt_kdf(plaintext)` | method | AES-GCM v2 (PBKDF2, 480k iters) → base64 str, header `PFLX\x02` |
 | `AESCipher.decrypt(ciphertext)` | method | Routes by `PFLX` marker + version byte; no marker → v2 AES-CBC |
 | `AESCipher.decrypt_legacy(ciphertext)` | method | Decrypt a v2 AES-CBC ciphertext; no migration warning |
-| `AESCipher.is_encrypted(value)` | staticmethod | `True` for a current-format ciphertext (base64 starts `UEZMWA`) |
-| `AESCipher.is_kdf(value)` | staticmethod | `True` for a current-format ciphertext made by `encrypt_kdf()` |
+| `AESCipher.has_marker(value)` | staticmethod | `True` if the value carries the `PFLX` marker, even truncated or of an unknown version |
+| `AESCipher.is_encrypted(value)` | staticmethod | `True` for a complete current-format ciphertext (base64 starts `UEZMWA`) |
+| `AESCipher.is_kdf(value)` | staticmethod | `True` for a complete current-format ciphertext made by `encrypt_kdf()` |
 | `AESCipher.is_legacy(value)` | staticmethod | `True` for a value shaped like a v2 AES-CBC ciphertext |
 | `AttrDict` | class | `dict` subclass exposing keys as attributes |
 | `Required` | class | Sentinel for `!required` tag; importable for programmatic injection/testing |
@@ -95,6 +96,11 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
   tiers never block loading, and are not caught if code reads `Cfg.env.<tier>` directly.
 - **The Vault client follows `VAULT_ADDR` / `VAULT_TOKEN`.** It is cached, and rebuilt when either
   value changes, so a reload after rotating the token uses the new one.
+- **Vault fetch errors carry the path and the exception class only**, e.g.
+  `Failed to fetch Vault secret at 'secret/myapp/db' (Forbidden)`. The hvac message and cause are
+  dropped because they can include the raw response body.
+- **Env-layer values are deep-copied into the root.** Changing the effective config (override or
+  runtime assignment) never changes `Cfg.env.<tier>`.
 - **`AttrDict` inherits from `dict`.** Use `Cfg.section.key` (attribute) or `Cfg.section['key']`
   (item) — both work. Call `.as_dict()` before passing to code that expects a plain `dict`.
 - **Directory and file names** under the config root must match `^[a-z][a-z0-9_]{0,28}[a-z0-9]$`.
@@ -106,7 +112,8 @@ Base YAML  →  env-layer merge (PYFLEX_ENV)  →  CFG__ env-var overrides  → 
 - **`pyflexcfg encrypt` acts only on real `!encr` / `!encr_kdf` tags** (it tokenizes the YAML), so
   `!encr` mentioned in a string or comment is ignored. Plain, quoted and flow-style values are
   handled. It skips what it cannot safely rewrite — block scalars, anchored values, tags with no
-  value, unparsable files, and legacy-shaped values that do not decrypt with the current key (wrong
+  value, unparsable files, values with the `PFLX` marker that are truncated or of an unknown
+  version, and legacy-shaped values that do not decrypt with the current key (wrong
   key, or plaintext that is itself base64 of 32/48/64… bytes). These are reported on stderr and the
   command exits 1; encrypt them manually with `AESCipher.encrypt()`.
 - **The tag does not enforce the ciphertext kind at load time.** `!encr` and `!encr_kdf` both decrypt

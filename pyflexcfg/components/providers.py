@@ -53,7 +53,8 @@ class VaultProvider(SecretProvider):
                 response = self._client.secrets.kv.v1.read_secret(path=kv_path, mount_point=mount)
                 data = response['data']
         except Exception as exc:
-            raise RuntimeError(f'Failed to fetch Vault secret at {secret_path!r}: {exc}') from exc
+            # hvac puts the raw response body in its error text, so neither that text nor the cause is kept.
+            raise RuntimeError(f'Failed to fetch Vault secret at {secret_path!r} ({type(exc).__name__})') from None
 
         if field:
             if field not in data:

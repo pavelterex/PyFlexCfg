@@ -1,5 +1,6 @@
 """Tests for CLI introspection and encrypt command (Feature 3)."""
 
+import base64
 import subprocess
 import sys
 from pathlib import Path
@@ -235,6 +236,18 @@ def test_encrypt_skips_already_encrypted(tmp_path):
     _run('encrypt', config_root=tmp_path)
     # File should be unchanged (no rewrite triggered)
     assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original
+
+
+@pytest.mark.parametrize('args', [('encrypt',), ('encrypt', '--dry-run')], ids=['write', 'dry-run'])
+@pytest.mark.parametrize('raw', [b'PFLX\x01', b'PFLX\x02' + b'\x00' * 20, b'PFLX\x09' + b'\x00' * 60], ids=str)
+def test_encrypt_marked_but_invalid_ciphertext_left_untouched(tmp_path, raw, args):
+    original = f'secret: !encr {base64.b64encode(raw).decode("ascii")}\n'
+    (tmp_path / 'app.yaml').write_text(original, encoding='utf-8')
+    result = _run(*args, config_root=tmp_path)
+
+    assert result.returncode == 1, f'a truncated or unknown-version ciphertext must fail the run: {result.stdout!r}'
+    assert 'truncated or of an unknown version' in result.stderr, f'got {result.stderr!r}'
+    assert (tmp_path / 'app.yaml').read_text(encoding='utf-8') == original, 'it must not be encrypted as plaintext'
 
 
 def test_encrypt_unknown_cmd_exits_nonzero():

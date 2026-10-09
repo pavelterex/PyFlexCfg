@@ -20,13 +20,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AESCipher.decrypt()` is self-routing: it reads the version byte after the `PFLX` marker (`\x01`
   for fast, `\x02` for KDF) so both tags share the same decrypt path.
 - **`AESCipher.is_encrypted()`, `AESCipher.is_kdf()`, `AESCipher.is_legacy()`,
-  `AESCipher.decrypt_legacy()`** — classify a value as current-format, PBKDF2-encrypted or
-  v2-shaped, and decrypt a v2 AES-CBC ciphertext explicitly.
+  `AESCipher.has_marker()`, `AESCipher.decrypt_legacy()`** — classify a value as current-format,
+  PBKDF2-encrypted, v2-shaped or merely marked, and decrypt a v2 AES-CBC ciphertext explicitly.
+  `is_encrypted()` and `is_kdf()` accept only a complete ciphertext; a truncated one is rejected,
+  and `decrypt()` reports it as truncated.
 - **`PYFLEX_ENV` environment layering.** Set `PYFLEX_ENV=dev` to deep-merge `Cfg.env.dev` into the
   root `Cfg` namespace after YAML loading. Layering order (lowest → highest): base YAML →
   env-layer merge → `CFG__*` env-var overrides → `validate_required()`.
   `Cfg.apply_env_layer()` can be called explicitly; it is also called automatically inside
-  `reload_config()`.
+  `reload_config()`. Layer values are deep-copied into the root, so overrides and runtime changes
+  to the effective config never alter the definitions under `Cfg.env`.
 - **`!required` YAML tag + `Cfg.validate_required()`.** Mark any scalar value `!required` to
   declare it must be supplied at runtime. If any `!required` sentinels survive all override layers,
   `validate_required()` raises `RuntimeError` listing every missing dotted path. Sentinels inside
@@ -47,6 +50,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     or non-directory config root, or one with no YAML files, is an error (exit 1), not an empty scan.
     A fast ciphertext under `!encr_kdf` is re-encrypted with PBKDF2 (and fails `--dry-run`); a
     PBKDF2 ciphertext under `!encr` is left alone.
+    A value carrying the marker but truncated or of an unknown version is reported and left alone.
     Any argument other than `--dry-run` is rejected before a file is touched. The config root's
     `*.env` files are loaded first, so `PYFLEX_CFG_KEY` may live there.
 - **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
@@ -54,7 +58,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
   when the path contains `/data/`; otherwise KV v1 is assumed. The Vault client is created on the
   first `!vault` tag hit and rebuilt whenever `VAULT_ADDR` or `VAULT_TOKEN` changes, so a reload
-  after rotating the token uses the new one. Every non-null leaf fetched — in a single field, a
+  after rotating the token uses the new one. A failed fetch raises with the secret path and the
+  kind of failure only; the Vault client's message, which can hold the response body, is not
+  included or chained. Every non-null leaf fetched — in a single field, a
   whole secret, or a nested object or list — is wrapped in `Secret`; non-string leaves are stored as
   the `Secret` of their text.
 - **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
