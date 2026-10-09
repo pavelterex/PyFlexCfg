@@ -1,27 +1,73 @@
 # PyFlexCfg
 
-**Flexible, zero-boilerplate YAML configuration for Python.** Drop a directory of YAML files next to
-your code, import `Cfg`, and every key is instantly reachable as an attribute — no schema, no init
-call, no glue code.
+[![CI](https://github.com/pavelterex/PyFlexCfg/actions/workflows/ci.yml/badge.svg)](https://github.com/pavelterex/PyFlexCfg/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pyflexcfg)](https://pypi.org/project/pyflexcfg/)
+[![Python](https://img.shields.io/pypi/pyversions/pyflexcfg)](https://pypi.org/project/pyflexcfg/)
+[![License](https://img.shields.io/pypi/l/pyflexcfg)](https://github.com/pavelterex/PyFlexCfg/blob/main/LICENSE)
+
+**YAML configuration for Python with no setup code, and secrets that stay out of your logs.**
+
+Put YAML files in a `config/` directory, import one name, and read your settings as attributes.
+There is no schema to declare, no loader to call and no settings class to maintain. Encrypted
+secrets, per-environment overrides, required keys and HashiCorp Vault are one YAML tag or one
+environment variable away.
+
+```yaml
+# config/app.yaml
+name: orders-api
+debug: false
+database:
+  host: !required                  # must be supplied at deploy time
+  port: 5432
+  password: !encr UEZMWA...        # AES-GCM ciphertext, safe to commit
+```
 
 ```python
-from pyflexcfg import Cfg
+from pyflexcfg import Cfg           # this line is the whole setup
 
-print(Cfg.database.host)      # loaded from config/database.yaml
-print(Cfg.app.api_key)        # '********'  — a Secret, masked everywhere
+Cfg.app.name                # 'orders-api'
+Cfg.app.database.port       # 5432
+Cfg.app.database.password   # ********   masked in repr, str, f-strings and logs
+```
+
+```shell
+# Forgot the required host? The app refuses to start and names what is missing:
+#   RuntimeError: Required config values are missing: ['app.database.host']
+
+CFG__APP__DATABASE__HOST=db.internal PYFLEX_ENV=prd python main.py
 ```
 
 ## Why PyFlexCfg?
 
-| Need | How PyFlexCfg covers it |
+**It gets out of the way.**
+
+- One import, no init call. `Cfg.section.key` works wherever you import it.
+- Your directory layout is your config structure: `config/env/dev.yaml` is `Cfg.env.dev`.
+- Three small dependencies: PyYAML, `cryptography` and `python-dotenv`. Python 3.10+.
+
+**It is careful with secrets.**
+
+- Commit secrets as authenticated AES-GCM ciphertext with `!encr`, or `!encr_kdf` for a slower,
+  brute-force-resistant key derivation. One command, `pyflexcfg encrypt`, encrypts every plaintext
+  value in place and doubles as a pre-commit check.
+- A decrypted value is a `Secret`: it prints as `********` in `repr`, `str`, every kind of string
+  formatting and the YAML dump, while your code still uses the real value.
+- PyFlexCfg's own errors and log messages name the key or variable at fault, never its value.
+- Config files are data only. They are parsed with a safe loader and cannot run code.
+- A stray `.env` file cannot silently replace the encryption key or Vault credentials your
+  deployment injects: a contradiction stops the load.
+
+**It fits real deployments.**
+
+| You need | You write |
 |---|---|
-| Clean attribute access | `Cfg.section.key` — no brackets, no string keys |
-| Per-environment config | `PYFLEX_ENV=staging` deep-merges `config/env/staging.yaml` into root |
-| Secrets that never leak | `!encr` / `!encr_kdf` tags; `Secret` masks itself in all repr/str/log output |
-| Mandatory keys | `!required` tag raises at startup listing every missing dotted path |
-| Env-var overrides | `CFG__DB__PORT=5433` overrides `Cfg.db.port` — no extra code |
-| HashiCorp Vault | `!vault secret/data/myapp#key` fetches at load time |
-| Introspection | `pyflexcfg show` prints the effective config as YAML (secrets masked) |
+| Different values per environment | `PYFLEX_ENV=staging` merges `config/env/staging.yaml` over the base |
+| An override without editing files | `CFG__DB__PORT=5433`, typed with a suffix such as `::int`, `::Secret` or `::path` |
+| A value that must be provided | `host: !required` — the app stops at load, listing every missing key |
+| Secrets from HashiCorp Vault | `password: !vault secret/data/myapp/db#password` |
+| A connection string around a secret | `url: !string ['postgresql://app:', !encr UEZMWA..., '@db:5432/orders']` |
+| Paths that work on any machine | `log_dir: !proj_root [logs]` or `cache: !home_dir [.cache, my-app]` |
+| To see what is actually in effect | `pyflexcfg show` prints the merged config, secrets masked |
 
 ## Contents
 
@@ -514,6 +560,12 @@ Posix path on a Windows host that talks to a remote Unix box).
 
 If one of the parts of a `!string` or a path tag is `!required`, the tag returns `Required` instead
 of the composed value (see [Required keys](#required-keys-required)).
+
+Besides these tags, config files may use everything standard YAML offers: strings, numbers,
+booleans, nulls, dates, lists, mappings, anchors and `!!binary`. Python-specific tags such as
+`!!python/tuple` or `!!python/object/apply:…` are **not** supported and make the file fail to load.
+That is deliberate: PyFlexCfg parses config files with PyYAML's safe loader, so a config file can
+describe data but can never make the application run code.
 
 Examples:
 

@@ -2,7 +2,7 @@ import os
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from yaml import Loader, ScalarNode, SequenceNode
+from yaml import SafeLoader, ScalarNode, SequenceNode
 
 from .abstractclasses import ICipher
 from .constants import ENCRYPTION_KEY_ENV_VAR, PROJECT_ROOT_PATH_ENV, ROOT_CONFIG_PATH_ENV
@@ -10,9 +10,12 @@ from .encryption import AESCipher
 from .misc import AttrDict, Required, Secret
 
 
-class YamlLoader(Loader):
+class YamlLoader(SafeLoader):
     """
     Custom YAML loader registering PyFlexCfg's tag set.
+
+    Based on `SafeLoader`: the full `Loader` would also construct arbitrary
+    Python objects from `!!python/...` tags, letting a config file run code.
 
     The `!proj_root` tag is resolved via :attr:`project_root`, a class attribute
     set by :class:`HandlerMeta` before any YAML file is parsed.
@@ -24,26 +27,26 @@ class YamlLoader(Loader):
         self._cipher: ICipher | None = None
         super().__init__(*args, **kwargs)
 
-        def encrypted(loader: Loader, node: ScalarNode) -> Secret:
+        def encrypted(loader: SafeLoader, node: ScalarNode) -> Secret:
             return Secret(self.cipher.decrypt(loader.construct_scalar(node)))
 
-        def home_dir(loader: Loader, node: SequenceNode) -> Path | Required:
+        def home_dir(loader: SafeLoader, node: SequenceNode) -> Path | Required:
             parts = loader.construct_sequence(node)
             return _missing(parts) or Path(Path.home(), *parts)
 
-        def path(loader: Loader, node: SequenceNode) -> Path | Required:
+        def path(loader: SafeLoader, node: SequenceNode) -> Path | Required:
             parts = loader.construct_sequence(node)
             return _missing(parts) or Path(*parts)
 
-        def path_posix(loader: Loader, node: SequenceNode) -> PurePosixPath | Required:
+        def path_posix(loader: SafeLoader, node: SequenceNode) -> PurePosixPath | Required:
             parts = loader.construct_sequence(node)
             return _missing(parts) or PurePosixPath(*parts)
 
-        def path_win(loader: Loader, node: SequenceNode) -> PureWindowsPath | Required:
+        def path_win(loader: SafeLoader, node: SequenceNode) -> PureWindowsPath | Required:
             parts = loader.construct_sequence(node)
             return _missing(parts) or PureWindowsPath(*parts)
 
-        def proj_root(loader: Loader, node: SequenceNode) -> Path | Required:
+        def proj_root(loader: SafeLoader, node: SequenceNode) -> Path | Required:
             parts = loader.construct_sequence(node)
             if missing := _missing(parts):
                 return missing
@@ -56,22 +59,22 @@ class YamlLoader(Loader):
 
             return Path(YamlLoader.project_root, *parts)
 
-        def pure_path(loader: Loader, node: SequenceNode) -> PurePath | Required:
+        def pure_path(loader: SafeLoader, node: SequenceNode) -> PurePath | Required:
             parts = loader.construct_sequence(node)
             return _missing(parts) or PurePath(*parts)
 
-        def pure_path_posix(loader: Loader, node: SequenceNode) -> PurePosixPath | Required:
+        def pure_path_posix(loader: SafeLoader, node: SequenceNode) -> PurePosixPath | Required:
             parts = loader.construct_sequence(node)
             return _missing(parts) or PurePosixPath(*parts)
 
-        def pure_path_win(loader: Loader, node: SequenceNode) -> PureWindowsPath | Required:
+        def pure_path_win(loader: SafeLoader, node: SequenceNode) -> PureWindowsPath | Required:
             parts = loader.construct_sequence(node)
             return _missing(parts) or PureWindowsPath(*parts)
 
-        def required(_loader: Loader, _node: ScalarNode) -> Required:
+        def required(_loader: SafeLoader, _node: ScalarNode) -> Required:
             return Required()
 
-        def string(loader: Loader, node: SequenceNode) -> str | Required:
+        def string(loader: SafeLoader, node: SequenceNode) -> str | Required:
             raw_parts = loader.construct_sequence(node)
             if missing := _missing(raw_parts):
                 return missing
@@ -81,7 +84,7 @@ class YamlLoader(Loader):
             joined = ''.join(parts)
             return Secret(joined) if any(isinstance(part, Secret) for part in parts) else joined
 
-        def vault(loader: Loader, node: ScalarNode) -> Any:
+        def vault(loader: SafeLoader, node: ScalarNode) -> Any:
             from .providers import get_vault_provider
 
             return _mask(get_vault_provider().fetch(loader.construct_scalar(node)))

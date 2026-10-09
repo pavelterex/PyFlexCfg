@@ -116,6 +116,9 @@ For other variables PyFlexCfg does not detect conflicts: define each variable in
   lock. `Cfg.reload_config()` and runtime mutation of `Cfg` are not synchronised.
 - **In tests**, call `Cfg.reload_config(config_path=...)` to switch config roots between cases.
   The `restore_cfg_after_test` autouse fixture in `conftest.py` does this automatically.
+- **Config files are parsed with PyYAML's safe loader.** Standard YAML plus the tags listed above
+  work; Python-specific tags (`!!python/tuple`, `!!python/name:…`, `!!python/object/apply:…`) raise
+  `yaml.YAMLError`. A config file can describe data but cannot run code. Never suggest such tags.
 - **`!encr` decrypts at YAML parse time**, not at attribute access. `PYFLEX_CFG_KEY` must be set
   before `Cfg` is first imported, not just before accessing the encrypted value.
 - **`!required` raises when `Cfg` loads** (the load ends with `validate_required()`), not when the

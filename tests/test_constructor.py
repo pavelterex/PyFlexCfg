@@ -1,3 +1,4 @@
+import datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -98,3 +99,41 @@ class TestConstructors:
 
         assert type(result) is str, f'a string with no secret part must stay a plain str, got {type(result).__name__}'
         assert result == 'http://host:8080', f'got {result!r}'
+
+    def test_python_object_tag_cannot_run_code(self, tmp_path):
+        target = tmp_path / 'created-by-yaml'
+        text = f'probe: !!python/object/apply:os.mkdir ["{target.as_posix()}"]'
+
+        with pytest.raises(yaml.YAMLError):
+            yaml.load(text, YamlLoader)
+
+        assert not target.exists(), 'loading a config file executed Python code'
+
+    @pytest.mark.parametrize(
+        'value',
+        [
+            pytest.param('!!python/object/apply:os.getcwd []', id='object/apply'),
+            pytest.param('!!python/name:os.getcwd', id='name'),
+            pytest.param('!!python/module:os', id='module'),
+            pytest.param('!!python/tuple [1, 2]', id='tuple'),
+        ],
+    )
+    def test_python_specific_tags_rejected(self, value):
+        with pytest.raises(yaml.YAMLError):
+            yaml.load(f'probe: {value}', YamlLoader)
+
+    def test_standard_yaml_types_still_load(self):
+        text = (
+            'text: hello\nnumber: 42\nratio: 1.5\nflag: true\nnothing: null\n'
+            'day: 2026-10-06\nitems: [a, b]\nmapping: {key: value}\nblob: !!binary aGVsbG8=\n'
+        )
+        data = yaml.load(text, YamlLoader)
+
+        assert data['number'] == 42, f'got {data["number"]!r}'
+        assert data['ratio'] == 1.5, f'got {data["ratio"]!r}'
+        assert data['flag'] is True, f'got {data["flag"]!r}'
+        assert data['nothing'] is None, f'got {data["nothing"]!r}'
+        assert data['day'] == datetime.date(2026, 10, 6), f'got {data["day"]!r}'
+        assert data['items'] == ['a', 'b'], f'got {data["items"]!r}'
+        assert data['mapping'] == {'key': 'value'}, f'got {data["mapping"]!r}'
+        assert data['blob'] == b'hello', f'got {data["blob"]!r}'

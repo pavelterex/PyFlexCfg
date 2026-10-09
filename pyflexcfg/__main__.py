@@ -139,7 +139,7 @@ def _find_edits(text: str, rel: str, cipher: AESCipher, report: _Report) -> list
         `(start, end, tag, plaintext)` per value: its character span and what to encrypt.
     """
     try:
-        tokens = list(yaml.scan(text, Loader=yaml.Loader))
+        tokens = list(yaml.scan(text, Loader=yaml.SafeLoader))
     except yaml.YAMLError as exc:
         # Only the position is reported: PyYAML's own message quotes the offending line.
         mark = getattr(exc, 'problem_mark', None)
