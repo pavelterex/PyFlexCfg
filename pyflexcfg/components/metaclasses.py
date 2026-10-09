@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import keyword
 import os
 import re
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,8 @@ from .yaml_loader import YamlLoader
 _NAME_RE = re.compile(NAME_REGEX_STRING)
 # Class attributes `reload_config` assigns that are not config values.
 _RESERVED_ATTRS = frozenset({'config_root', 'project_root'})
+# Key names that attribute access on an `AttrDict` resolves to its own method or dunder instead of the value.
+_SHADOWED_KEYS = frozenset(dir(AttrDict))
 
 
 class HandlerMeta(type):
@@ -44,7 +48,11 @@ class HandlerMeta(type):
         cls.project_root = cls.resolve_project_root()
         YamlLoader.project_root = cls.project_root
 
-        cls.load_config(cls.config_root, init_attrs)
+        loaded = AttrDict()
+        cls.load_config(cls.config_root, loaded)
+        cls.check_root_names(loaded, init_attrs['_handler_attrs'])
+        cls.warn_unreachable_keys(loaded)
+        init_attrs.update(loaded)
 
         return super().__new__(cls, name, bases, init_attrs)
 
@@ -52,6 +60,12 @@ class HandlerMeta(type):
         """Return the current configuration formatted as YAML."""
         dct = {key: cls.__dict__[key] for key in cls._config_keys()}
         return yaml.dump(dct, Dumper=YamlDumper, indent=4, default_flow_style=False, sort_keys=False)
+
+    @classmethod
+    def check_root_names(cls, names: Iterable[str], handler_attrs: frozenset[str]) -> None:
+        """Raise `RuntimeError` if a top-level config name would replace a member of the handler class."""
+        if conflicts := sorted(handler_attrs.intersection(names)):
+            raise RuntimeError(f'Namespace conflict: {conflicts} would replace members of the config handler')
 
     @classmethod
     def load_config(cls, config_path: Path, dct: AttrDict) -> None:
@@ -146,6 +160,24 @@ class HandlerMeta(type):
 
         return data
 
+    @classmethod
+    def warn_unreachable_keys(cls, tree: Mapping[Any, Any]) -> None:
+        """
+        Log one WARNING listing every name in `tree` that dot notation cannot reach.
+
+        Covers Python keywords, non-identifiers, non-string keys and, below the top
+        level, names that resolve to a dict attribute. Top-level names become class
+        attributes, so a dict-attribute name there is reachable and not reported.
+        """
+        entries = sorted(_unreachable_entries(tree, '', top_level=True))
+
+        if entries:
+            logger.warning(
+                'These config names cannot be read with dot notation: %s. Use item access instead, for example '
+                "Cfg.app['items'] rather than Cfg.app.items; for a top-level name use getattr(Cfg, 'name').",
+                ', '.join(entries),
+            )
+
     def _config_keys(cls) -> list[str]:
         """Names of the class attributes that hold config values, not handler machinery."""
         return [key for key in cls.__dict__ if not key.startswith('_') and key not in cls._handler_attrs]
@@ -165,3 +197,44 @@ class HandlerMeta(type):
 
         dct[file.stem] = data
         logger.debug('Loaded configuration file: %s', file)
+
+
+def _child_path(path: str, key: Any) -> str:
+    """Extend `path` with `key`: dotted for an identifier, bracketed otherwise."""
+    if isinstance(key, str) and key.isidentifier():
+        return f'{path}.{key}' if path else key
+
+    return f'{path}[{key!r}]'
+
+
+def _unreachable_entries(value: Any, path: str, *, top_level: bool = False) -> Iterator[str]:
+    """Yield `path (reason)` for every key under `value` that dot notation cannot reach."""
+    match value:
+        case dict():
+            for key, item in value.items():
+                child = _child_path(path, key)
+
+                if reason := _unreachable_reason(key, top_level=top_level):
+                    yield f'{child} ({reason})'
+
+                yield from _unreachable_entries(item, child)
+        case list() | tuple():
+            for index, item in enumerate(value):
+                yield from _unreachable_entries(item, f'{path}[{index}]')
+
+
+def _unreachable_reason(key: Any, *, top_level: bool) -> str | None:
+    """Say why `key` cannot be read as an attribute, or return `None` if it can."""
+    if not isinstance(key, str):
+        return 'not a string'
+
+    if keyword.iskeyword(key):
+        return 'Python keyword'
+
+    if not key.isidentifier():
+        return 'not an identifier'
+
+    if not top_level and key in _SHADOWED_KEYS:
+        return 'dict attribute'
+
+    return None

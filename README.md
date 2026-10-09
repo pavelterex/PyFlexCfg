@@ -91,6 +91,55 @@ PYFLEX_ENV=dev python app.py
 Directory and file names must be lowercase identifiers matching `^[a-z][a-z0-9_]{0,28}[a-z0-9]$`.
 Names that don't match are silently skipped during loading.
 
+A file or directory directly in the config root may not be named after a member of `Cfg` itself:
+`reload_config`, `apply_env_layer`, `update_from_env`, `validate_required`, `config_root` or
+`project_root`. Loading such a tree raises `RuntimeError: Namespace conflict`.
+
+### Names that dot notation cannot reach
+
+Keys inside a YAML file are not restricted, and neither are Python keywords as file names. Some of
+those names load fine but cannot be written as `Cfg.section.name`:
+
+| Kind of name | Examples | Why dot notation fails |
+|---|---|---|
+| Python keyword | `class`, `import`, `global`, `pass`, `from` | `Cfg.app.class` is a syntax error |
+| Not an identifier | `my-key`, `with space`, `a.b`, `1st` | It cannot be written as an attribute |
+| Not a string | `1`, `1.5`, `true`, `off`, `null`, `2024-01-01` | YAML reads these keys as numbers, booleans, null or dates |
+| A dict method or dunder | `items`, `keys`, `values`, `get`, `copy`, `update`, `__len__` | `Cfg.app.items` is the dict's own method |
+
+Built-in names that are not keywords — `print`, `list`, `type`, `id` — are fine: `Cfg.app.print`
+works.
+
+Read such a value with item access, and a top-level name with `getattr`:
+
+```python
+Cfg.app['class']          # key named with a keyword
+Cfg.app['my-key']         # key that is not an identifier
+Cfg.app[1]                # non-string key
+Cfg.app['items']          # key named like a dict method
+getattr(Cfg, 'global')    # config/global.yaml
+```
+
+Every time the config loads, PyFlexCfg logs one WARNING listing these names with their paths:
+
+```text
+These config names cannot be read with dot notation: app.class (Python keyword), app.items (dict
+attribute), app['my-key'] (not an identifier), app[1] (not a string), global (Python keyword). Use
+item access instead, for example Cfg.app['items'] rather than Cfg.app.items; for a top-level name
+use getattr(Cfg, 'name').
+```
+
+Two details:
+
+- A dict-method name at the very top level, such as `config/items.yaml`, is reachable as `Cfg.items`
+  and is not reported. Keywords are reported at every level.
+- The warning is a log message, so it shows only when your application has logging configured (see
+  [Logging](#logging)).
+
+One case cannot be detected at load time. A key that starts with two underscores and does not end
+with two (`__token`) works as `Cfg.app.__token` at module level, but inside a class body Python
+rewrites the name and the access fails with `AttributeError`. Use `Cfg.app['__token']` there.
+
 **When loading happens.** The configuration is loaded the first time `Cfg` is requested from the
 package — in practice, at your `from pyflexcfg import Cfg` line. That is also where a missing config
 root or an unsatisfied `!required` key raises. A bare `import pyflexcfg`, or importing only
@@ -162,6 +211,32 @@ CFG__DB={port: 6543, ssl: true}::yaml_r        # dict — wipes Cfg.db, writes o
 `::yaml_m` falls back to replace semantics when either side is not a dict. Overrides for missing
 dotted paths are logged at DEBUG level and skipped.
 
+**How a variable name is matched to keys.** Variable names are case-insensitive: the name is
+lowercased and split on `__`, and each part is matched against the config keys at that level.
+
+- A key spelled exactly like the lowercase part wins.
+- Otherwise a key that differs only in case matches, and keeps its own spelling:
+  `CFG__APP__APIKEY=…` updates `apiKey`, and `CFG__APP__DB__PORT=…` updates `DB.Port`.
+- If two keys differ only in case and neither is the exact lowercase form (`Host` and `HOST`), the
+  variable is ambiguous and loading raises `RuntimeError` naming both keys.
+- If the last part matches no key, a new key is created under the lowercase name.
+
+Keys that cannot be spelled in a variable name cannot be overridden this way: a hyphenated key such
+as `my-key` (`CFG__APP__MY_KEY` creates a separate `my_key`), a key containing a double underscore,
+or a non-string key. Replace the parent mapping with `::yaml_m` or `::yaml_r` instead:
+`CFG__APP='{my-key: new}::yaml_m'`.
+
+The path is resolved key by key, so config keys that share a name with a dict method work as
+override targets: `CFG__APP__ITEMS__SIZE=5` sets the `size` under a key called `items`. When reading
+such a key in code, use item access (`Cfg.app['items']`) — `Cfg.app.items` is the dict method. See
+[Names that dot notation cannot reach](#names-that-dot-notation-cannot-reach).
+
+The first path component may not be a name PyFlexCfg itself uses on `Cfg`: one starting with an
+underscore, or a handler member (`reload_config`, `apply_env_layer`, `update_from_env`,
+`validate_required`, `config_root`, `project_root`). Such a variable, for example
+`CFG__RELOAD_CONFIG=…`, raises `RuntimeError` naming it. Paths under `env`
+(`CFG__ENV__DEV__REGION=…`) are allowed.
+
 ---
 
 ## Environment layering (`PYFLEX_ENV`)
@@ -187,6 +262,12 @@ Priority order (lowest → highest): base YAML → env-layer merge → `CFG__*` 
 
 Layer values are copied into the root, not shared with it. A `CFG__*` override or a change you make
 to the effective config never alters the definition under `Cfg.env.<tier>`.
+
+A tier file may be named anything that is a valid config name, including words such as `items` or
+`keys`. Its top-level keys, however, become attributes of `Cfg`, so a few names are rejected with a
+`RuntimeError` before anything is merged: `env` itself, names starting with an underscore, the
+handler's own members (`reload_config`, `apply_env_layer`, `update_from_env`, `validate_required`,
+`config_root`, `project_root`), and non-string keys.
 
 If `PYFLEX_ENV` names a tier that doesn't exist, PyFlexCfg logs a DEBUG message and continues
 without error — a typo fails silently by design so that missing envs don't crash production.
@@ -522,12 +603,21 @@ validation).
 
 ## Logging
 
-PyFlexCfg writes to the `pyflexcfg` logger at DEBUG level. To enable:
+PyFlexCfg logs to the `pyflexcfg` logger: load details at DEBUG, and a few things you should act on
+at WARNING — a legacy ciphertext that needs migrating, a short encryption key, and config names that
+dot notation cannot reach (see
+[Names that dot notation cannot reach](#names-that-dot-notation-cannot-reach)).
+
+Like most libraries, PyFlexCfg attaches no output handler of its own, so **none of these messages
+appear unless your application configures logging**. Do that before `Cfg` is first imported:
 
 ```python
 import logging
 
-logging.getLogger('pyflexcfg').setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.WARNING)             # shows PyFlexCfg's warnings
+logging.getLogger('pyflexcfg').setLevel(logging.DEBUG)  # optional: load details too
+
+from pyflexcfg import Cfg
 ```
 
 PyFlexCfg keeps secret values out of its own log messages and out of the errors it raises for

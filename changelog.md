@@ -29,7 +29,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   env-layer merge → `CFG__*` env-var overrides → `validate_required()`.
   `Cfg.apply_env_layer()` can be called explicitly; it is also called automatically inside
   `reload_config()`. Layer values are deep-copied into the root, so overrides and runtime changes
-  to the effective config never alter the definitions under `Cfg.env`.
+  to the effective config never alter the definitions under `Cfg.env`. A tier may be named like a
+  dict method (`env/items.yaml`). A layer whose top-level keys are reserved — `env`, private names,
+  handler members, non-strings — is rejected with `RuntimeError` before anything is merged.
 - **`!required` YAML tag + `Cfg.validate_required()`.** Mark any scalar value `!required` to
   declare it must be supplied at runtime. If any `!required` sentinels survive all override layers,
   `validate_required()` raises `RuntimeError` listing every missing dotted path. Sentinels inside
@@ -63,6 +65,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   included or chained. Every non-null leaf fetched — in a single field, a
   whole secret, or a nested object or list — is wrapped in `Secret`; non-string leaves are stored as
   the `Secret` of their text.
+- **Warning for config names that dot notation cannot reach.** Python keywords (`class`, `global`),
+  non-identifiers (`my-key`), non-string keys (`1`, `true`) and nested keys named like a dict method
+  or dunder (`items`, `keys`, `__len__`) still load, but cannot be written as `Cfg.section.name`.
+  Each load now logs one WARNING listing them with their paths and the reason, and pointing to item
+  access (`Cfg.app['items']`, `getattr(Cfg, 'global')`).
 - **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
   `len(PYFLEX_CFG_KEY) < 32`.
 - **`Required` class exported from the package root** (`from pyflexcfg import Required`). Useful
@@ -81,6 +88,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joined as its mask, producing e.g. `'postgresql://app:********@db'`. The real value is now joined
   in and the result is a `Secret`, so `!string ['postgresql://app:', !encr …, '@db']` yields a usable,
   masked connection string. `!string` with no secret part still returns a plain `str`.
+- **Root-level config names that collide with handler members are rejected on every load path.**
+  A file or directory in the config root named `reload_config`, `apply_env_layer`, `update_from_env`,
+  `validate_required`, `config_root` or `project_root` now raises `RuntimeError: Namespace conflict`.
+  Previously `config_root` and `project_root` were accepted, and all six were accepted when loaded
+  through `reload_config()`, replacing the member and breaking later reloads.
+- **`CFG__*` overrides resolve their path by key and refuse handler names.** A path through a key
+  named like a dict method (`CFG__APP__ITEMS__SIZE=5`) used to be silently ignored and now applies;
+  `::yaml_m` onto such a key now merges instead of replacing. An override whose first component is
+  private or a handler member (`CFG__RELOAD_CONFIG=…`) used to replace that member on `Cfg` and now
+  raises `RuntimeError`.
+- **`CFG__*` overrides match keys case-insensitively.** `CFG__APP__APIKEY=…` used to leave a key
+  spelled `apiKey` untouched and add a stray `apikey`; it now updates `apiKey`. An exact lowercase
+  key still wins, and two keys differing only in case with no exact match raise `RuntimeError`.
+  Keys that cannot be spelled in a variable name (`my-key`, names containing `__`, non-strings)
+  remain unaddressable; use `::yaml_m` on the parent.
 - **`Cfg.reload_config(reset=True)` now drops every config value before loading**, not only
   mapping-valued ones. Top-level scalars and lists set by the env layer, a `CFG__*` override or
   runtime assignment no longer survive a reload after their source is gone. `reset=False` is

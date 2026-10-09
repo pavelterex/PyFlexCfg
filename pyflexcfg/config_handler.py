@@ -1,5 +1,5 @@
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from .components.yaml_loader import YamlLoader
 # Top-level namespace holding the `PYFLEX_ENV` layer definitions (`config/env/<tier>.yaml`).
 _LAYERS_KEY = 'env'
 _MERGE_SUFFIXES = {'yaml_m'}
+_MISSING = object()
 
 
 def _collect_required(value: Any, path: str, missing: list[str]) -> None:
@@ -39,6 +40,57 @@ def _deep_merge(target: AttrDict, source: AttrDict) -> None:
             _deep_merge(existing, value)
         else:
             target[key] = deepcopy(value)
+
+
+def _descend(root: Mapping, names: list[str]) -> tuple[Any, str | None]:
+    """
+    Follow `names` through nested mappings by item lookup, matching keys as :func:`_match_key` does.
+
+    Item lookup, not attribute access: a key such as `items` must not resolve to a dict method.
+
+    Returns:
+        `(value, None)` when every name resolves, else `(None, first_unresolved_name)`.
+
+    Raises:
+        ValueError: A name matches several keys that differ only in case.
+    """
+    container: Any = root
+
+    for name in names:
+        key = _match_key(container, name) if isinstance(container, Mapping) else _MISSING
+        if key is _MISSING:
+            return None, name
+        container = container[key]
+
+    return container, None
+
+
+def _is_reserved(key: Any, handler_attrs: frozenset[str]) -> bool:
+    """Tell whether `key` is unusable as a top-level config name: non-string, private or a handler member."""
+    return not isinstance(key, str) or key.startswith('_') or key in handler_attrs
+
+
+def _match_key(mapping: Mapping, name: str) -> Any:
+    """
+    Find the key of `mapping` that the lowercase override path component `name` addresses.
+
+    An exact match wins; otherwise the single key equal to `name` ignoring case.
+
+    Returns:
+        The matching key, or `_MISSING` when there is none.
+
+    Raises:
+        ValueError: Several keys match ignoring case and none matches exactly.
+    """
+    if name in mapping:
+        return name
+
+    matches = [key for key in mapping if isinstance(key, str) and key.lower() == name]
+
+    if len(matches) > 1:
+        raise ValueError(f'{name!r} matches several keys that differ only in case: {sorted(matches)}')
+
+    return matches[0] if matches else _MISSING
 
 
 def _parse_yaml(value: str) -> Any:
@@ -81,16 +133,30 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         keys into the root namespace.  Runs before :meth:`update_from_env` so
         ``CFG__*`` overrides always take priority over the env layer.
         No-ops silently when ``PYFLEX_ENV`` is unset or the named layer is not found.
+
+        Raises:
+            RuntimeError: The layer has a top-level key that is not a string, is
+                private, is ``env``, or names a handler member. Nothing is merged.
         """
         env_name = os.getenv(ACTIVE_ENV_VAR, '').lower()
+
         if not env_name:
             return
-        env_obj = getattr(getattr(cls, _LAYERS_KEY, None), env_name, None)
+
+        # Mapping lookups throughout: attribute access would resolve names such as `items` to dict methods.
+        layers = cls.__dict__.get(_LAYERS_KEY)
+        env_obj = layers.get(env_name) if isinstance(layers, AttrDict) else None
+
         if not isinstance(env_obj, AttrDict):
             logger.debug('PYFLEX_ENV=%r: no config found at Cfg.env.%s', env_name, env_name)
             return
+
+        # A layer may not redefine the layer namespace either.
+        if reserved := [key for key in env_obj if key == _LAYERS_KEY or _is_reserved(key, cls._handler_attrs)]:
+            raise RuntimeError(f'Env layer {env_name!r} defines reserved top-level key(s): {reserved}')
+
         for key, value in env_obj.items():
-            existing = getattr(cls, key, None)
+            existing = cls.__dict__.get(key)
             if isinstance(existing, AttrDict) and isinstance(value, AttrDict):
                 _deep_merge(existing, value)
             else:
@@ -140,6 +206,8 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
 
         loaded = AttrDict()
         HandlerMeta.load_config(path, loaded)
+        HandlerMeta.check_root_names(loaded, cls._handler_attrs)
+        HandlerMeta.warn_unreachable_keys(loaded)
 
         for key, value in loaded.items():
             setattr(cls, key, value)
@@ -158,6 +226,10 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
         `::yaml_m` suffix is **merged** into the existing config dict; every
         other value (including `::yaml_r`) **replaces** it. Paths whose
         intermediate components are missing are logged and skipped.
+
+        Raises:
+            RuntimeError: A value cannot be cast to the type its suffix names, or
+                the first path component is private or names a handler member.
         """
         for var_name, var_value in os.environ.items():
             if not var_name.lower().startswith('cfg__'):
@@ -167,36 +239,42 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
             if not keys or not all(keys):
                 continue
 
+            if _is_reserved(keys[0], cls._handler_attrs):
+                raise RuntimeError(f'{var_name}: {keys[0]!r} is a reserved name and cannot be overridden')
+
+            *parents, leaf = keys
+            # Config values only, so a path can never resolve to handler machinery.
+            root = {key: cls.__dict__[key] for key in cls._config_keys()}
+
             try:
                 converted, merge = cls._convert_value_type(var_value)
+                container, missing = _descend(root, parents)
+                target = _match_key(container, leaf) if isinstance(container, Mapping) else _MISSING
             except ValueError as exc:
                 raise RuntimeError(f'{var_name}: {exc}') from None
 
-            container: Any = cls
-            for key in keys[:-1]:
-                try:
-                    container = getattr(container, key)
-                except AttributeError:
-                    logger.debug('Skipping override %s: intermediate key %r not found', var_name, key)
-                    container = None
-                    break
-
-            if container is None:
+            if missing is not None:
+                logger.debug('Skipping override %s: intermediate key %r not found', var_name, missing)
                 continue
 
-            leaf = keys[-1]
-            existing = getattr(container, leaf, None)
+            if not isinstance(container, Mapping):
+                # Only the container's type is logged: its repr would print a config value.
+                logger.debug('Skipping override %s: cannot assign on a %s value', var_name, type(container).__name__)
+                continue
+
+            # An existing key keeps its own spelling; a new one is created as the lowercase name.
+            if target is _MISSING:
+                target = leaf
+
+            existing = container.get(target)
             value = HandlerMeta.to_attrdict(converted)
 
             if merge and isinstance(value, dict) and isinstance(existing, dict):
                 existing.update(value)
+            elif parents:
+                container[target] = value
             else:
-                try:
-                    setattr(container, leaf, value)
-                except (AttributeError, TypeError) as exc:
-                    # Only the container's type is logged: its repr would print a config value.
-                    kind = type(container).__name__
-                    logger.debug('Skipping override %s: cannot assign on a %s value (%s)', var_name, kind, exc)
+                setattr(cls, target, value)
 
     @classmethod
     def validate_required(cls) -> None:

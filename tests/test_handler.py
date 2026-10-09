@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -11,6 +12,8 @@ from pytest_assume.plugin import assume
 from pyflexcfg import Cfg
 from pyflexcfg.components.encryption import AESCipher
 from pyflexcfg.components.misc import AttrDict, Secret
+
+_UNREACHABLE = 'cannot be read with dot notation'
 
 IMPROPER_NAMES_PARAM_SET = [
     param('_testname_', id='private like'),
@@ -249,6 +252,79 @@ class TestTmpPath:
 
         assert hasattr(Cfg, 'new_only'), 'second load should populate new_only'
         assert not hasattr(Cfg, 'old_only'), 'reset=True must drop attrs from prior load'
+
+    def test_root_level_names_like_dict_methods_not_warned(self, tmp_path: Path, caplog):
+        _write(tmp_path / 'items.yaml', 'size: 1')
+        _write(tmp_path / 'general.yaml', 'host: localhost')
+
+        with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert Cfg.items.size == 1, 'a root-level name is reachable by attribute, whatever it is called'
+        assert not any(_UNREACHABLE in r.getMessage() for r in caplog.records), (
+            'a reachable root-level name, or a config with only ordinary keys, must not be warned about'
+        )
+
+    @pytest.mark.parametrize(
+        'stem',
+        ['apply_env_layer', 'config_root', 'project_root', 'reload_config', 'update_from_env', 'validate_required'],
+    )
+    def test_root_name_colliding_with_handler_member_raises(self, tmp_path: Path, stem):
+        _write(tmp_path / f'{stem}.yaml', 'key: value')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with pytest.raises(RuntimeError, match='Namespace conflict') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert stem in str(exc_info.value), f'the error must name the file stem, got {exc_info.value}'
+        for method in ('apply_env_layer', 'reload_config', 'update_from_env', 'validate_required'):
+            assert callable(getattr(Cfg, method)), f'{method} was replaced by a config file'
+        assert not isinstance(Cfg.project_root, AttrDict), 'project_root was replaced by a config file'
+
+    def test_unreachable_keys_warned(self, tmp_path: Path, caplog):
+        _write(
+            tmp_path / 'app.yaml',
+            """
+            items:
+              size: 1
+            nested:
+              keys: [a, b]
+              servers:
+                - class: web
+            my-key: hyphen
+            1: number
+            false: boolean
+            __len__: dunder
+            plain: fine
+            print: also fine
+            """,
+        )
+        _write(tmp_path / 'global.yaml', 'region: eu')
+        (tmp_path / 'env').mkdir()
+        _write(tmp_path / 'env' / 'copy.yaml', 'host: copy-host')
+
+        with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+            Cfg.reload_config(config_path=tmp_path)
+        warnings = [r.getMessage() for r in caplog.records if _UNREACHABLE in r.getMessage()]
+        expected = (
+            'app.items (dict attribute)',
+            'app.nested.keys (dict attribute)',
+            'app.nested.servers[0].class (Python keyword)',
+            "app['my-key'] (not an identifier)",
+            'app[1] (not a string)',
+            'app[False] (not a string)',
+            'app.__len__ (dict attribute)',
+            'env.copy (dict attribute)',
+            'global (Python keyword)',
+        )
+
+        assert len(warnings) == 1, f'expected one combined warning, got {warnings!r}'
+        for entry in expected:
+            assert entry in warnings[0], f'{entry!r} is missing from the warning: {warnings[0]!r}'
+        for ordinary in ('app.plain', 'app.print', 'app.nested (', 'env ('):
+            assert ordinary not in warnings[0], f'{ordinary!r} is reachable but was reported: {warnings[0]!r}'
+        assert Cfg.app['items']['size'] == 1, 'the config must still load and be readable by item access'
+        assert getattr(Cfg, 'global').region == 'eu', 'a keyword-named file must still load'
 
 
 def _write(path: Path, content: str) -> None:

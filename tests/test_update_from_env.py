@@ -7,6 +7,8 @@ import pytest
 from pyflexcfg import Cfg
 from pyflexcfg.components.misc import Secret
 
+_DICT_METHOD_KEYS_YAML = 'items:\n  size: 1\nkeys:\n  copy:\n    size: 1\nvalues: 3\n'
+
 
 @pytest.fixture
 def loaded_cfg(tmp_path: Path):
@@ -74,6 +76,13 @@ def test_int_auto_coercion(loaded_cfg, monkeypatch):
     assert isinstance(loaded_cfg.general.port, int), f'expected int, got {type(loaded_cfg.general.port).__name__}'
 
 
+def test_layer_definition_override_still_allowed(loaded_cfg, monkeypatch):
+    monkeypatch.setenv('CFG__ENV__DEV__REGION', 'eu-west-1')
+    loaded_cfg.update_from_env()
+
+    assert loaded_cfg.env.dev.region == 'eu-west-1', 'paths under the env namespace must stay overridable'
+
+
 def test_missing_intermediate_path_logs_and_skips(loaded_cfg, monkeypatch, caplog):
     monkeypatch.setenv('CFG__NOSUCH__SECTION__KEY', 'value')
 
@@ -92,11 +101,110 @@ def test_non_cfg_env_vars_ignored(loaded_cfg, monkeypatch):
     assert loaded_cfg.general.port == original, 'non-CFG env vars must not touch config'
 
 
+def test_override_ambiguous_case_variants_raise(tmp_path, monkeypatch):
+    (tmp_path / 'app.yaml').write_text('Host: first\nHOST: second\n', encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__HOST', 'new')
+
+    with pytest.raises(RuntimeError, match='several keys') as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+    msg = str(exc_info.value)
+
+    assert 'CFG__APP__HOST' in msg, f'the error must name the variable, got {msg!r}'
+    assert 'Host' in msg, f'the error must list the candidate keys, got {msg!r}'
+    assert 'HOST' in msg, f'the error must list the candidate keys, got {msg!r}'
+
+
+def test_override_cannot_address_hyphenated_key(tmp_path, monkeypatch):
+    (tmp_path / 'app.yaml').write_text('my-key: original\n', encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__MY_KEY', 'new')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app['my-key'] == 'original', 'a hyphenated key is not addressable from a variable name'
+
+
+def test_override_matches_keys_case_insensitively(tmp_path, monkeypatch):
+    (tmp_path / 'app.yaml').write_text('Host: orig\napiKey: orig\nDB:\n  Port: 1\nlower: orig\n', encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__HOST', 'new-host')
+    monkeypatch.setenv('CFG__APP__APIKEY', 'new-key')
+    monkeypatch.setenv('CFG__APP__DB__PORT', '5433')
+    monkeypatch.setenv('CFG__APP__DB', '{Name: main}::yaml_m')
+
+    Cfg.reload_config(config_path=tmp_path)
+    expected = {'Host': 'new-host', 'apiKey': 'new-key', 'DB': {'Port': 5433, 'Name': 'main'}, 'lower': 'orig'}
+
+    assert Cfg.app == expected, f'overrides must update the existing keys and add no stray ones: {dict(Cfg.app)!r}'
+
+
+def test_override_new_leaf_created_lowercase(loaded_cfg, monkeypatch):
+    monkeypatch.setenv('CFG__GENERAL__BRAND_NEW', 'added')
+    loaded_cfg.update_from_env()
+
+    assert loaded_cfg.general.brand_new == 'added', 'an override for a key that does not exist creates it, lowercase'
+
+
+def test_override_prefers_exact_key_over_case_variant(tmp_path, monkeypatch):
+    (tmp_path / 'app.yaml').write_text('host: lower\nHost: capitalised\n', encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__HOST', 'new')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app == {'host': 'new', 'Host': 'capitalised'}, f'the exact lowercase key must win: {dict(Cfg.app)!r}'
+
+
+def test_override_root_level_key_matched_case_insensitively(tmp_path, monkeypatch):
+    (tmp_path / 'env').mkdir()
+    (tmp_path / 'app.yaml').write_text('host: base\n', encoding='utf-8')
+    (tmp_path / 'env' / 'dev.yaml').write_text('LogLevel: debug\n', encoding='utf-8')
+    monkeypatch.setenv('PYFLEX_ENV', 'dev')
+    monkeypatch.setenv('CFG__LOGLEVEL', 'info')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.LogLevel == 'info', f'the root-level key must be updated in place, got {Cfg.LogLevel!r}'
+    assert not hasattr(Cfg, 'loglevel'), 'a stray lowercase key was created at the root'
+
+
+def test_override_through_keys_named_like_dict_methods(tmp_path, monkeypatch):
+    (tmp_path / 'app.yaml').write_text(_DICT_METHOD_KEYS_YAML, encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__ITEMS__SIZE', '5')
+    monkeypatch.setenv('CFG__APP__KEYS__COPY__SIZE', '6')
+    monkeypatch.setenv('CFG__APP__VALUES', '7')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app['items']['size'] == 5, 'an override path through a key named "items" was ignored'
+    assert Cfg.app['keys']['copy']['size'] == 6, 'an override path through keys named "keys" and "copy" was ignored'
+    assert Cfg.app['values'] == 7, 'an override of a leaf named "values" was ignored'
+
+
 def test_quotes_in_value_do_not_break_parsing(loaded_cfg, monkeypatch):
     monkeypatch.setenv('CFG__GENERAL__HOST', 'it\'s "fine" now')
     loaded_cfg.update_from_env()
 
     assert loaded_cfg.general.host == 'it\'s "fine" now', f'got {loaded_cfg.general.host!r}'
+
+
+@pytest.mark.parametrize(
+    'name',
+    [
+        'CFG__VALIDATE_REQUIRED',
+        'CFG__RELOAD_CONFIG',
+        'CFG__UPDATE_FROM_ENV__X',
+        'CFG__CONFIG_ROOT',
+        'CFG___HANDLER_ATTRS',
+    ],
+)
+def test_reserved_top_level_override_rejected(loaded_cfg, monkeypatch, name):
+    monkeypatch.setenv(name, 'oops')
+
+    with pytest.raises(RuntimeError, match='reserved') as exc_info:
+        loaded_cfg.update_from_env()
+
+    assert name in str(exc_info.value), f'the error must name the variable, got {exc_info.value}'
+    for method in ('reload_config', 'update_from_env', 'validate_required'):
+        assert callable(getattr(loaded_cfg, method)), f'{method} was replaced by an override'
+    assert isinstance(loaded_cfg.config_root, Path), 'config_root was replaced by an override'
 
 
 def test_string_override(loaded_cfg, monkeypatch):
@@ -134,6 +242,15 @@ def test_yaml_m_cast_merges_dict_into_existing(loaded_cfg, monkeypatch):
     assert loaded_cfg.general.nested.a == 99, f'a must be overridden, got {loaded_cfg.general.nested.a!r}'
     assert loaded_cfg.general.nested.b == 2, f'b must persist, got {loaded_cfg.general.nested.b!r}'
     assert loaded_cfg.general.nested.c == 3, f'c must be added, got {loaded_cfg.general.nested.c!r}'
+
+
+def test_yaml_m_merges_into_key_named_like_dict_method(tmp_path, monkeypatch):
+    (tmp_path / 'app.yaml').write_text(_DICT_METHOD_KEYS_YAML, encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__ITEMS', '{extra: 9}::yaml_m')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app['items'] == {'size': 1, 'extra': 9}, f'yaml_m must merge, not replace: {Cfg.app["items"]!r}'
 
 
 def test_yaml_r_cast_produces_list(loaded_cfg, monkeypatch):

@@ -77,6 +77,35 @@ def test_env_layer_overridden_by_cfg_env_var(monkeypatch, env_config):
     assert Cfg.database.host == 'override-host'
 
 
+@pytest.mark.parametrize('key', ['reload_config', 'apply_env_layer', 'config_root', 'env', '_handler_attrs', 1])
+def test_env_layer_reserved_key_rejected(monkeypatch, tmp_path, key):
+    (tmp_path / 'env').mkdir()
+    (tmp_path / 'database.yaml').write_text('host: base-host\n', encoding='utf-8')
+    (tmp_path / 'env' / 'dev.yaml').write_text(f'database:\n  host: dev-host\n{key}:\n  x: 1\n', encoding='utf-8')
+    monkeypatch.setenv('PYFLEX_ENV', 'dev')
+
+    with pytest.raises(RuntimeError, match='reserved') as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+
+    assert repr(key) in str(exc_info.value), f'the error must name the offending key, got {exc_info.value}'
+    assert Cfg.database.host == 'base-host', 'nothing from a rejected layer may be merged'
+    assert callable(Cfg.reload_config), 'handler machinery must be intact'
+    assert callable(Cfg.apply_env_layer), 'handler machinery must be intact'
+    assert Cfg.config_root == tmp_path, 'handler attributes must be intact'
+
+
+@pytest.mark.parametrize('tier', ['items', 'keys', 'copy', 'get'])
+def test_env_layer_tier_named_like_dict_method_applied(monkeypatch, tmp_path, tier):
+    (tmp_path / 'env').mkdir()
+    (tmp_path / 'database.yaml').write_text('host: base-host\n', encoding='utf-8')
+    (tmp_path / 'env' / f'{tier}.yaml').write_text(f'database:\n  host: {tier}-host\n', encoding='utf-8')
+    monkeypatch.setenv('PYFLEX_ENV', tier)
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.database.host == f'{tier}-host', f'tier {tier!r} was not applied, host is {Cfg.database.host!r}'
+
+
 def test_env_layer_values_copied_not_aliased(monkeypatch, tmp_path):
     (tmp_path / 'env').mkdir()
     (tmp_path / 'app.yaml').write_text('host: base\n', encoding='utf-8')

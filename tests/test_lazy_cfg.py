@@ -62,6 +62,15 @@ def test_cfg_loads_once_under_concurrent_first_access(monkeypatch):
     assert results == [ConfigHandler] * thread_count, 'every thread must receive the loaded Cfg'
 
 
+@pytest.mark.parametrize('stem', ['config_root', 'project_root', 'reload_config'])
+def test_first_load_rejects_root_name_colliding_with_handler_member(tmp_path, stem):
+    (tmp_path / f'{stem}.yaml').write_text('key: value\n', encoding='utf-8')
+    result = _run_code('from pyflexcfg import Cfg', cwd=tmp_path, root=tmp_path)
+
+    assert result.returncode != 0, f'a root file named {stem}.yaml must not load'
+    assert 'Namespace conflict' in result.stderr, f'got {result.stderr!r}'
+
+
 def test_package_imports_without_config_root(tmp_path):
     code = 'from pyflexcfg import AESCipher, AttrDict, Required, Secret; print("ok")'
     result = _run_code(code, cwd=tmp_path)
