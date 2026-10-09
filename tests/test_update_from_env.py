@@ -1,5 +1,5 @@
 import logging
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from textwrap import dedent
 
 import pytest
@@ -35,6 +35,50 @@ def test_bool_auto_coercion(loaded_cfg, monkeypatch):
     loaded_cfg.update_from_env()
 
     assert loaded_cfg.general.debug is True, f'expected True, got {loaded_cfg.general.debug!r}'
+
+
+@pytest.mark.parametrize(
+    'raw, expected',
+    [
+        pytest.param('cache/app::home_dir', Path(Path.home(), 'cache', 'app'), id='home_dir'),
+        pytest.param('/var/log/app.log::path', Path('/var/log/app.log'), id='path'),
+        pytest.param('/var/log/app.log::path_posix', PurePosixPath('/var/log/app.log'), id='path_posix'),
+        pytest.param(r'C:\logs\app.log::path_win', PureWindowsPath(r'C:\logs\app.log'), id='path_win'),
+        pytest.param('logs/app.log::pure_path', PurePath('logs', 'app.log'), id='pure_path'),
+        pytest.param('/var/log/app.log::pure_path_posix', PurePosixPath('/var/log/app.log'), id='pure_path_posix'),
+        pytest.param(r'C:\logs\app.log::pure_path_win', PureWindowsPath(r'C:\logs\app.log'), id='pure_path_win'),
+    ],
+)
+def test_explicit_path_casts(loaded_cfg, monkeypatch, raw, expected):
+    monkeypatch.setenv('CFG__GENERAL__HOST', raw)
+    loaded_cfg.update_from_env()
+    result = loaded_cfg.general.host
+
+    assert type(result) is type(expected), f'expected {type(expected).__name__}, got {type(result).__name__}'
+    assert result == expected, f'got {result!r}'
+    assert str(loaded_cfg), 'a path override must still render in str(Cfg)'
+
+
+def test_explicit_proj_root_cast(tmp_path, monkeypatch):
+    (tmp_path / 'general.yaml').write_text('log_file: placeholder\n', encoding='utf-8')
+    monkeypatch.setenv('CFG__GENERAL__LOG_FILE', 'logs/app.log::proj_root')
+
+    Cfg.reload_config(config_path=tmp_path, project_root=tmp_path.parent)
+
+    assert Cfg.general.log_file == Path(tmp_path.parent, 'logs', 'app.log'), f'got {Cfg.general.log_file!r}'
+    assert isinstance(Cfg.general.log_file, Path), f'expected a Path, got {type(Cfg.general.log_file).__name__}'
+
+
+def test_explicit_proj_root_cast_without_project_root_raises(tmp_path, monkeypatch):
+    (tmp_path / 'general.yaml').write_text('log_file: placeholder\n', encoding='utf-8')
+    monkeypatch.setenv('PYFLEX_CFG_ROOT_PATH', str(tmp_path))
+    monkeypatch.delenv('PYFLEX_PROJECT_ROOT_PATH', raising=False)
+    monkeypatch.setenv('CFG__GENERAL__LOG_FILE', 'logs/app.log::proj_root')
+
+    with pytest.raises(RuntimeError, match='PYFLEX_PROJECT_ROOT_PATH') as exc_info:
+        Cfg.reload_config(config_path=tmp_path)
+
+    assert 'CFG__GENERAL__LOG_FILE' in str(exc_info.value), f'the error must name the variable, got {exc_info.value}'
 
 
 def test_explicit_secret_cast(loaded_cfg, monkeypatch):

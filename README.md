@@ -282,6 +282,24 @@ a trailing `::Type` suffix:
 | `::yaml_r` | Parse as YAML, **replace** the existing value wholesale |
 | `::yaml_m` | Parse as YAML, **merge** into the existing dict (both sides must be dicts) |
 
+Path suffixes turn the value into a path object. Each is named after the YAML tag that produces the
+same type, and takes the whole path as one string:
+
+| Suffix | Result | Same as tag |
+|---|---|---|
+| `::path` | `Path` — host-native | `!path` |
+| `::home_dir` | `Path` under the current user's home directory | `!home_dir` |
+| `::proj_root` | `Path` under the project root | `!proj_root` |
+| `::path_posix` | `PurePosixPath` | `!path_posix` |
+| `::path_win` | `PureWindowsPath` | `!path_win` |
+| `::pure_path` | `PurePath` — OS-default flavour | `!pure_path` |
+| `::pure_path_posix` | `PurePosixPath` | `!pure_path_posix` |
+| `::pure_path_win` | `PureWindowsPath` | `!pure_path_win` |
+
+`::proj_root` needs a project root, exactly as the tag does: if none can be resolved, loading raises
+`RuntimeError` naming the variable (see
+[Configuration root and project root](#configuration-root-and-project-root)).
+
 Examples:
 
 ```dotenv
@@ -292,6 +310,10 @@ CFG__DB__PASSWORD=hunter2::Secret              # masked Secret
 CFG__SERVERS=[host-a, host-b, host-c]::yaml_r  # list — replaces existing
 CFG__DB={port: 6543, ssl: true}::yaml_m        # dict — merged into Cfg.db
 CFG__DB={port: 6543, ssl: true}::yaml_r        # dict — wipes Cfg.db, writes only these keys
+CFG__APP__LOG_FILE=/var/log/app.log::path      # Path('/var/log/app.log')
+CFG__APP__CACHE_DIR=.cache/my-app::home_dir    # Path.home() / '.cache' / 'my-app'
+CFG__APP__DATA_DIR=data/raw::proj_root         # <project root> / 'data' / 'raw'
+CFG__APP__REMOTE_LOG=/var/log/app.log::pure_path_posix   # PurePosixPath, on any host
 ```
 
 `::yaml_m` falls back to replace semantics when either side is not a dict. Overrides for missing
@@ -404,6 +426,36 @@ the complete list:
 CFG__APP__HOSTS='[host-a, host-b]::yaml_r' python app.py
 ```
 
+`!required` can also be one part of a composed value: a `!string`, or any of the path tags (`!path`,
+`!home_dir`, `!proj_root`, `!path_posix`, `!path_win`, `!pure_path`, `!pure_path_posix`,
+`!pure_path_win`). The composed value is then required as a whole: it is reported under its own key,
+and you satisfy it by overriding that key, not the part.
+
+```yaml
+# config/app.yaml
+url: !string ['https://', !required , '/api']    # note the space before the comma
+log_file: !path [logs, !required , app.log]
+```
+
+```shell
+CFG__APP__URL=https://example.com/api CFG__APP__LOG_FILE=/var/log/app.log::path python app.py
+```
+
+An override always supplies the complete value. For a path tag, add the matching path suffix
+(`::path`, `::proj_root`, `::pure_path_posix`, …) so that `Cfg.app.log_file` is a path object, just
+as the tag would have produced. Without a suffix the override arrives as a plain string.
+
+Inside a flow list (`[...]`), leave a space after `!required`. Written as `!required]` or
+`!required,` the bracket or comma is read as part of the tag name and the file fails to load. A
+block list avoids the issue:
+
+```yaml
+url: !string
+  - 'https://'
+  - !required
+  - '/api'
+```
+
 The `Required` sentinel class is importable if you need to inspect or inject it programmatically:
 
 ```python
@@ -434,6 +486,9 @@ Cfg.validate_required()  # raises if any Required() sentinels remain
 
 The "pure" variants let you compose paths targeting a different OS than the host (e.g. building a
 Posix path on a Windows host that talks to a remote Unix box).
+
+If one of the parts of a `!string` or a path tag is `!required`, the tag returns `Required` instead
+of the composed value (see [Required keys](#required-keys-required)).
 
 Examples:
 
@@ -520,7 +575,9 @@ connect(Cfg.db.url)                # receives postgresql://app:hunter2@db.exampl
 ```
 
 When any part is a secret, the whole result is a `Secret`: it holds the real, fully composed value
-and is masked wherever it is displayed. With no secret part, `!string` returns a plain `str`.
+and is masked wherever it is displayed. With no secret part, `!string` returns a plain `str`. If a
+part is `!required`, the whole value is required (see
+[Required keys](#required-keys-required)).
 
 If you compose in code instead, **do not use an f-string, `format()` or `%`** — formatting a
 `Secret` yields its mask. Concatenate or join, and wrap the result if you want it to stay masked:

@@ -55,7 +55,7 @@ optional HashiCorp Vault integration.
 | `!required` | scalar | `Required` | Raises when `Cfg` loads if not satisfied by an override |
 | `!vault <path>#<field>` | scalar | `Secret` | Fetches from HashiCorp Vault; needs `hvac` installed |
 | `!vault <path>` | scalar | `AttrDict` | Whole secret; every leaf is a `Secret` |
-| `!string [a, b, c]` | sequence | `str` / `Secret` | Joins parts: `"abc"`; a `Secret` if any part is one |
+| `!string [a, b, c]` | sequence | `str` / `Secret` / `Required` | Joins parts: `"abc"`; a `Secret` if any part is one; `Required` if any part is `!required` |
 | `!path [a, b]` | sequence | `Path` | `Path(a, b)` (host-native) |
 | `!path_win [a, b]` | sequence | `PureWindowsPath` | |
 | `!path_posix [a, b]` | sequence | `PurePosixPath` | |
@@ -119,6 +119,12 @@ For other variables PyFlexCfg does not detect conflicts: define each variable in
   `CFG__APP__HOSTS='[a, b]::yaml_r'`.
 - **Layers come only from the `env/` directory.** A root-level `env.yaml` file is ordinary config:
   `PYFLEX_ENV` never merges it and its `!required` values are validated normally.
+- **`!required` as a part of `!string` or of any path tag makes the whole value required.** The tag
+  returns `Required`; it is reported under the composed key and satisfied by overriding that key
+  (`CFG__APP__URL=…`, `CFG__APP__LOG_FILE=/var/log/app.log::path`). Without a path suffix an
+  override for a path tag yields a plain `str`. In a flow list write `!required ,` or `!required ]` with a space:
+  `!required]` is parsed as a tag named `required]` and the file fails to load. A block list avoids
+  this.
 - **`!required` is validated on the effective config only.** The `env/` layer definitions are
   skipped: a sentinel in `env/prd.yaml` counts only once `PYFLEX_ENV=prd` merges it into the root,
   and is then reported as `database.password`, not `env.prd.database.password`. Sentinels in inactive
@@ -163,6 +169,12 @@ For other variables PyFlexCfg does not detect conflicts: define each variable in
   part creates a new lowercase key. Hyphenated keys (`my-key`), keys containing `__` and non-string
   keys cannot be addressed; override the parent with `::yaml_m`, e.g.
   `CFG__APP='{my-key: new}::yaml_m'`.
+- **`CFG__*` values take an optional `::Type` suffix.** Scalars: `::int`, `::float`, `::bool`,
+  `::str`, `::Secret`; YAML: `::yaml_m` (merge), `::yaml_r` (replace); paths, named after the tag
+  giving the same type: `::path`, `::home_dir`, `::proj_root`, `::path_posix`, `::path_win`,
+  `::pure_path`, `::pure_path_posix`, `::pure_path_win`. A path suffix takes the whole path as one
+  string (`/var/log/app.log::path`). `::proj_root` raises `RuntimeError` when no project root is
+  resolvable. Without a suffix the value is auto-coerced `int` → `float` → `bool` → `str`.
 - **`CFG__*` overrides cannot target handler names.** A first path component that starts with `_`
   or names a handler member (`reload_config`, `apply_env_layer`, `update_from_env`,
   `validate_required`, `config_root`, `project_root`) raises `RuntimeError`. Paths under `env` are

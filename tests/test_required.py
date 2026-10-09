@@ -82,6 +82,48 @@ def test_required_in_sequence_reported_with_index(tmp_path):
     assert 'app.hosts[0]' not in msg, f'a real list item must not be reported, got {msg!r}'
 
 
+def test_required_inside_path_tag_satisfied_with_path_suffix(monkeypatch, tmp_path):
+    (tmp_path / 'app.yaml').write_text('log_file: !path [logs, !required , app.log]\n', encoding='utf-8')
+    monkeypatch.setenv('CFG__APP__LOG_FILE', '/var/log/app.log::path')
+
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.log_file == Path('/var/log/app.log'), f'got {Cfg.app.log_file!r}'
+    assert isinstance(Cfg.app.log_file, Path), 'the ::path suffix must give back a path object, as the tag would'
+
+
+@pytest.mark.parametrize('override', [None, '/var/log/app.log'], ids=['not supplied', 'whole key overridden'])
+def test_required_inside_path_tag(monkeypatch, tmp_path, override):
+    (tmp_path / 'app.yaml').write_text('log_file: !path [logs, !required , app.log]\nname: demo\n', encoding='utf-8')
+    if override is None:
+        with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert "'app.log_file'" in str(exc_info.value), f'the composed key must be reported, got {exc_info.value}'
+        return
+
+    monkeypatch.setenv('CFG__APP__LOG_FILE', override)
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.log_file == override, f'overriding the whole key must satisfy it, got {Cfg.app.log_file!r}'
+
+
+@pytest.mark.parametrize('override', [None, 'https://example.com/api'], ids=['not supplied', 'whole key overridden'])
+def test_required_inside_string_tag(monkeypatch, tmp_path, override):
+    (tmp_path / 'app.yaml').write_text("url: !string ['https://', !required , '/api']\nname: demo\n", encoding='utf-8')
+    if override is None:
+        with pytest.raises(RuntimeError, match='Required config values are missing') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert "'app.url'" in str(exc_info.value), f'the composed key must be reported, got {exc_info.value}'
+        return
+
+    monkeypatch.setenv('CFG__APP__URL', override)
+    Cfg.reload_config(config_path=tmp_path)
+
+    assert Cfg.app.url == override, f'overriding the whole key must satisfy it, got {Cfg.app.url!r}'
+
+
 def test_required_multiple_missing_all_reported(monkeypatch):
     with pytest.raises(RuntimeError) as exc_info:
         _load_required(monkeypatch)

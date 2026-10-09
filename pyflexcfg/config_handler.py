@@ -1,13 +1,13 @@
 import os
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
 
 from .components import logger
-from .components.constants import ACTIVE_ENV_VAR
+from .components.constants import ACTIVE_ENV_VAR, PROJECT_ROOT_PATH_ENV
 from .components.metaclasses import HandlerMeta
 from .components.misc import AttrDict, Required, Secret
 from .components.yaml_loader import YamlLoader
@@ -110,10 +110,34 @@ def _to_bool(value: str) -> bool:
     raise ValueError(f'Cannot interpret {value!r} as bool')
 
 
+def _to_home_dir(value: str) -> Path:
+    """Build a path under the current user's home directory, as the `!home_dir` tag does."""
+    return Path(Path.home(), value)
+
+
+def _to_proj_root(value: str) -> Path:
+    """Build a path under the project root, as the `!proj_root` tag does."""
+    if YamlLoader.project_root is None:
+        raise RuntimeError(
+            f'::proj_root cannot be resolved: set {PROJECT_ROOT_PATH_ENV} or pass project_root to reload_config()',
+        )
+
+    return Path(YamlLoader.project_root, value)
+
+
+# Suffix names mirror the YAML tag names, so `::path_posix` gives what `!path_posix` gives.
 _TYPE_CASTERS: dict[str, Callable[[str], Any]] = {
     'bool': _to_bool,
     'float': float,
+    'home_dir': _to_home_dir,
     'int': int,
+    'path': Path,
+    'path_posix': PurePosixPath,
+    'path_win': PureWindowsPath,
+    'proj_root': _to_proj_root,
+    'pure_path': PurePath,
+    'pure_path_posix': PurePosixPath,
+    'pure_path_win': PureWindowsPath,
     'Secret': Secret,
     'str': str,
     'yaml_m': _parse_yaml,
@@ -251,7 +275,7 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
                 converted, merge = cls._convert_value_type(var_value)
                 container, missing = _descend(root, parents)
                 target = _match_key(container, leaf) if isinstance(container, Mapping) else _MISSING
-            except ValueError as exc:
+            except (RuntimeError, ValueError) as exc:
                 raise RuntimeError(f'{var_name}: {exc}') from None
 
             if missing is not None:
@@ -310,7 +334,8 @@ class ConfigHandler(AttrDict, metaclass=HandlerMeta):
 
         If the value contains the `::` separator, the suffix names an explicit
         target type (`int`, `float`, `bool`, `str`, `Secret`,
-        `yaml_m`, `yaml_r`). Otherwise the string is auto-coerced as
+        `yaml_m`, `yaml_r`, or a path type named after its YAML tag, such as
+        `path` or `proj_root`). Otherwise the string is auto-coerced as
         `int` → `float` → `bool` and falls back to the original `str`
         if none succeed.
 

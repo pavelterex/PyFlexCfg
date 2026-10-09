@@ -4,7 +4,7 @@ import pytest
 import yaml
 from conftest import TEST_ENCRYPTED_STRING, TEST_STRING
 
-from pyflexcfg.components.misc import Secret
+from pyflexcfg.components.misc import Required, Secret
 from pyflexcfg.components.yaml_dumper import YamlDumper
 from pyflexcfg.components.yaml_loader import YamlLoader
 
@@ -27,6 +27,16 @@ class TestConstructors:
 
         assert isinstance(result, Path), f'expected Path, got {type(result).__name__}'
         assert result == Path('tmp', 'app', 'data'), f'got {result!r}'
+
+    @pytest.mark.parametrize(
+        'tag',
+        ['home_dir', 'path', 'path_posix', 'path_win', 'proj_root', 'pure_path', 'pure_path_posix', 'pure_path_win'],
+    )
+    @pytest.mark.parametrize('layout', ['[logs, !required , app.log]', '\n  - logs\n  - !required\n  - app.log\n'])
+    def test_construct_path_like_with_required_part_stays_required(self, tag, layout):
+        result = yaml.load(f'target: !{tag} {layout}', YamlLoader)['target']
+
+        assert isinstance(result, Required), f'!{tag} with a required part must stay required, got {result!r}'
 
     def test_construct_path_posix(self, constructor_config):
         result = constructor_config['path_posix']
@@ -69,6 +79,19 @@ class TestConstructors:
         assert dsn == f'postgres://app:{TEST_STRING}@db.example.com:5432/main', 'the real secret must be composed in'
         assert repr(dsn) == '********', 'the composed string must be masked'
         assert TEST_STRING not in yaml.dump(data, Dumper=YamlDumper), 'the secret leaked into the YAML dump'
+
+    @pytest.mark.parametrize(
+        'text',
+        [
+            pytest.param("url: !string\n  - 'https://'\n  - !required\n  - '/api'\n", id='block list'),
+            pytest.param("url: !string ['https://', !required , '/api']", id='flow list'),
+            pytest.param(f"url: !string ['https://', !encr {TEST_ENCRYPTED_STRING}, !required ]", id='with a secret'),
+        ],
+    )
+    def test_construct_string_with_required_part_stays_required(self, text):
+        result = yaml.load(text, YamlLoader)['url']
+
+        assert isinstance(result, Required), f'a string with a required part must stay required, got {result!r}'
 
     def test_construct_string_without_secret_stays_plain_str(self):
         result = yaml.load("url: !string ['http://', host, ':', 8080]", YamlLoader)['url']

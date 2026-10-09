@@ -80,6 +80,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or dunder (`items`, `keys`, `__len__`) still load, but cannot be written as `Cfg.section.name`.
   Each load now logs one WARNING listing them with their paths and the reason, and pointing to item
   access (`Cfg.app['items']`, `getattr(Cfg, 'global')`).
+- **Path `::Type` suffixes for `CFG__*` overrides.** `::path`, `::home_dir`, `::proj_root`,
+  `::path_posix`, `::path_win`, `::pure_path`, `::pure_path_posix` and `::pure_path_win` turn an
+  override into the same path type the YAML tag of that name produces, e.g.
+  `CFG__APP__LOG_FILE=/var/log/app.log::path`.
 - **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
   `len(PYFLEX_CFG_KEY) < 32`.
 - **`Required` class exported from the package root** (`from pyflexcfg import Required`). Useful
@@ -97,7 +101,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`!string` composes secrets correctly.** A part tagged `!encr`, `!encr_kdf` or `!vault` used to be
   joined as its mask, producing e.g. `'postgresql://app:********@db'`. The real value is now joined
   in and the result is a `Secret`, so `!string ['postgresql://app:', !encr …, '@db']` yields a usable,
-  masked connection string. `!string` with no secret part still returns a plain `str`.
+  masked connection string. `!string` with no secret part still returns a plain `str`. A `!required`
+  part makes the whole composed value required, where it used to become the literal text
+  `<required>` and pass validation. The path tags (`!path`, `!home_dir`, `!proj_root` and the pure
+  variants) do the same, where a `!required` part used to raise a `TypeError` from `pathlib`.
 - **Root-level config names that collide with handler members are rejected on every load path.**
   A file or directory in the config root named `reload_config`, `apply_env_layer`, `update_from_env`,
   `validate_required`, `config_root` or `project_root` now raises `RuntimeError: Namespace conflict`.
