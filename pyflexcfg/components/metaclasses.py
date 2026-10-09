@@ -3,7 +3,6 @@ from __future__ import annotations
 import keyword
 import os
 import re
-from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -119,55 +118,44 @@ class HandlerMeta(type):
     @classmethod
     def load_env_files(cls, config_path: Path) -> None:
         """
-        Load every `*.env` file in `config_path` (non-recursive) into the environment.
+        Load the `*.env` file directly inside `config_path` into the environment.
 
-        A file value replaces a variable the process already set, with one exception:
-        for the credential variables in `_PROTECTED_ENV_VARS` a different value in a
-        file is refused, so neither source silently wins. More than one file is
-        allowed but logged as a WARNING, since their load order is not defined.
+        At most one such file may exist. Its values replace variables the process
+        already set, with one exception: for the credential variables in
+        `_PROTECTED_ENV_VARS` a different value in the file is refused, so neither
+        source silently wins.
 
         Raises:
-            RuntimeError: A file gives a protected variable a value that differs from
-                the one the process provides. No file is applied in that case.
+            RuntimeError: More than one `.env` file is present, or the file gives a
+                protected variable a value that differs from the one the process
+                provides. Nothing is read into the environment in either case.
         """
         if not config_path.is_dir():
             return
 
-        files = {
-            item: dotenv_values(item) for item in config_path.iterdir() if item.is_file() and item.suffix == '.env'
-        }
-
-        if len(files) > 1:
-            counts = Counter(_env_name(name) for values in files.values() for name in values)
-            repeated = sorted(name for name, count in counts.items() if count > 1)
-            logger.warning(
-                'Found %d .env files in %s (%s). Keep exactly one: they load in no guaranteed order, so a variable '
-                'defined in several of them gets an undefined value. Defined in more than one: %s.',
-                len(files),
-                config_path,
-                ', '.join(sorted(item.name for item in files)),
-                ', '.join(repeated) or 'none',
-            )
-
-        conflicts = sorted(
-            f'{name} ({item.name})'
-            for item, values in files.items()
-            for name, value in values.items()
-            if _contradicts_process(name, value)
-        )
-
-        if conflicts:
+        env_files = sorted(item for item in config_path.iterdir() if item.is_file() and item.suffix == '.env')
+        if len(env_files) > 1:
+            names = ', '.join(item.name for item in env_files)
             raise RuntimeError(
-                'Set by the process and, to a different value, in a .env file: '
-                f'{", ".join(conflicts)}. Define each of these variables in one place only.',
+                f'Found {len(env_files)} .env files in {config_path} ({names}). Keep exactly one: '
+                'several would load in no guaranteed order, leaving shared variables undefined.',
             )
 
-        for item, values in files.items():
+        for env_file in env_files:
+            values = dotenv_values(env_file)
+            conflicts = sorted(name for name, value in values.items() if _contradicts_process(name, value))
+            if conflicts:
+                raise RuntimeError(
+                    'Set by the process and, to a different value, in a .env file: '
+                    f'{", ".join(f"{name} ({env_file.name})" for name in conflicts)}. '
+                    'Define each of these variables in one place only.',
+                )
+
             for name, value in values.items():
                 if value is not None:
                     os.environ[name] = value
                     _env_file_values[_env_name(name)] = value
-            logger.debug('Loaded env file: %s', item)
+            logger.debug('Loaded env file: %s', env_file)
 
     @classmethod
     def resolve_project_root(cls, custom_root: bool = False) -> Path | None:

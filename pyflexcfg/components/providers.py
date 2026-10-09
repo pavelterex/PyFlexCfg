@@ -6,6 +6,8 @@ from typing import Any
 
 from .misc import AttrDict
 
+_KV2_PREFIX = 'data/'
+
 
 class SecretProvider(ABC):
     @abstractmethod
@@ -34,18 +36,18 @@ class VaultProvider(SecretProvider):
 
         Path format: ``mount/path/to/secret#field``. The ``#field`` suffix
         selects one key from the secret's data dict; omit it to get the full
-        dict returned as an :class:`AttrDict`.  KV v2 is detected when the
-        path contains ``/data/``; otherwise KV v1 is assumed. The first path
-        segment is the mount point in both cases.
+        dict returned as an :class:`AttrDict`. The first path segment is the
+        mount point. KV v2 is detected when ``data/`` comes directly after it
+        (``mount/data/...``); any other path, including one with ``data``
+        further down, is read as KV v1.
         """
         secret_path, _, field = path.partition('#')
         mount, _, kv_path = secret_path.partition('/')
 
         try:
-            if '/data/' in secret_path:
-                kv_path = kv_path.partition('/')[2]  # strip leading 'data/'
+            if kv_path.startswith(_KV2_PREFIX):
                 response = self._client.secrets.kv.v2.read_secret_version(
-                    path=kv_path,
+                    path=kv_path.removeprefix(_KV2_PREFIX),
                     mount_point=mount,
                 )
                 data: dict[str, Any] = response['data']['data']

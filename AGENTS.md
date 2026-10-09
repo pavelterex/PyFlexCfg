@@ -76,23 +76,21 @@ Precedence when a setting is given in several places, lowest to highest:
 YAML files  <  active PYFLEX_ENV layer  <  CFG__* set by the process  <  CFG__* in a .env file
 ```
 
-`*.env` files in the config root are loaded first and **override the process environment** for the
-variables they define (`CFG__*`, `PYFLEX_ENV`, …); the values are written into `os.environ`.
+The single `*.env` file in the config root is loaded first and **overrides the process environment**
+for the variables it defines (`CFG__*`, `PYFLEX_ENV`, …); the values are written into `os.environ`.
 
-**Exception — `PYFLEX_CFG_KEY`, `VAULT_ADDR`, `VAULT_TOKEN`:** if the process provides one and a
-`.env` file gives it a *different* value, loading (and `pyflexcfg encrypt`) raises `RuntimeError`
-naming the variable and file, and applies nothing from any `.env`. Same value in both places is
-fine; a file may supply one the process lacks; a value that originally came from a `.env` may be
-rotated there and picked up by `reload_config()`.
+**At most one `.env` file may exist in the config root.** Two or more raise `RuntimeError` naming
+them, on first load, on `reload_config()` and in every `pyflexcfg` command; nothing is read into the
+environment. Never suggest splitting settings across several `.env` files, and flag stray ones
+(`old.env`, `backup.env`) as load-breaking. Version 2 loaded every `.env` file it found.
+
+**Exception to file-wins — `PYFLEX_CFG_KEY`, `VAULT_ADDR`, `VAULT_TOKEN`:** if the process provides
+one and the `.env` file gives it a *different* value, loading (and `pyflexcfg encrypt`) raises
+`RuntimeError` naming the variable and file, and applies nothing from the file. Same value in both
+places is fine; the file may supply one the process lacks; a value that originally came from the
+`.env` file may be rotated there and picked up by `reload_config()`.
 
 For other variables PyFlexCfg does not detect conflicts: define each variable in one place.
-
-**Use exactly one `.env` file in the config root.** Every `*.env` file there is loaded, in
-unspecified directory order; a variable defined in two files gets an undefined value, even for the
-three credential variables. Loading does not stop; it logs one WARNING naming the files and the
-variables defined in more than one. `pyflexcfg encrypt` is stricter and exits 1 when it finds more
-than one `.env` file. Never suggest splitting settings across several `.env` files,
-and flag stray ones (`old.env`, `backup.env`).
 
 `PYFLEX_CFG_ROOT_PATH` cannot come from a `.env` file.
 
@@ -122,6 +120,9 @@ and flag stray ones (`old.env`, `backup.env`).
   skipped: a sentinel in `env/prd.yaml` counts only once `PYFLEX_ENV=prd` merges it into the root,
   and is then reported as `database.password`, not `env.prd.database.password`. Sentinels in inactive
   tiers never block loading, and are not caught if code reads `Cfg.env.<tier>` directly.
+- **Vault paths are `mount/path#field`; the KV version comes from the path.** `mount/data/…` is read
+  as KV v2 (`secret/data/myapp/db` → mount `secret`, path `myapp/db`); any other path is KV v1, even
+  with `data` further down (`secret/team/data/app` → path `team/data/app`).
 - **The Vault client follows `VAULT_ADDR` / `VAULT_TOKEN`.** It is cached, and rebuilt when either
   value changes, so a reload after rotating the token uses the new one.
 - **Vault fetch errors carry the path and the exception class only**, e.g.
@@ -151,9 +152,8 @@ and flag stray ones (`old.env`, `backup.env`).
   `apply_env_layer`, `update_from_env`, `validate_required`, `config_root`, `project_root`); loading
   raises `RuntimeError: Namespace conflict`.
 - **PyFlexCfg's log messages are invisible by default.** The `pyflexcfg` logger has only a
-  `NullHandler`; warnings (legacy ciphertext, short key, several `.env` files, unreachable names)
-  appear only if the application configures logging, e.g. `logging.basicConfig()` before importing
-  `Cfg`.
+  `NullHandler`; warnings (legacy ciphertext, short key, unreachable names) appear only if the
+  application configures logging, e.g. `logging.basicConfig()` before importing `Cfg`.
 - **`CFG__*` path parts match keys case-insensitively.** An exact lowercase key wins; otherwise the
   one key differing only in case is updated and keeps its spelling (`CFG__APP__APIKEY` → `apiKey`).
   Two case-variants with no exact match (`Host`, `HOST`) raise `RuntimeError`. An unmatched last

@@ -62,6 +62,17 @@ def test_cfg_loads_once_under_concurrent_first_access(monkeypatch):
     assert results == [ConfigHandler] * thread_count, 'every thread must receive the loaded Cfg'
 
 
+def test_first_load_rejects_more_than_one_env_file(tmp_path):
+    (tmp_path / 'app.yaml').write_text('key: value\n', encoding='utf-8')
+    (tmp_path / 'app.env').write_text('ENV_PROBE_A=1\n', encoding='utf-8')
+    (tmp_path / 'backup.env').write_text('ENV_PROBE_B=1\n', encoding='utf-8')
+    result = _run_code('from pyflexcfg import Cfg', cwd=tmp_path, root=tmp_path)
+
+    assert result.returncode != 0, 'a config root with two .env files must not load'
+    assert 'app.env' in result.stderr, f'the error must name both files, got {result.stderr!r}'
+    assert 'backup.env' in result.stderr, f'the error must name both files, got {result.stderr!r}'
+
+
 @pytest.mark.parametrize('stem', ['config_root', 'project_root', 'reload_config'])
 def test_first_load_rejects_root_name_colliding_with_handler_member(tmp_path, stem):
     (tmp_path / f'{stem}.yaml').write_text('key: value\n', encoding='utf-8')

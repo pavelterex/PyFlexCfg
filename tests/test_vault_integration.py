@@ -76,6 +76,7 @@ def vault_server():
         _seed(container_id, 'secret/myapp/api', key='abc123')
         _vault(container_id, 'secrets', 'enable', '-path=kv1', '-version=1', 'kv')
         _seed(container_id, 'kv1/myapp/legacy', token='v1-token')
+        _seed(container_id, 'kv1/team/data/app', token='nested-token')
 
         yield container_id
     finally:
@@ -85,6 +86,13 @@ def vault_server():
 def test_kv1_fetch_field(vault_env):
     provider = VaultProvider()
     assert provider.fetch('kv1/myapp/legacy#token') == 'v1-token', 'KV v1 field must be read from its own mount'
+
+
+def test_kv1_fetch_path_with_nested_data_segment(vault_env):
+    provider = VaultProvider()
+    assert provider.fetch('kv1/team/data/app#token') == 'nested-token', (
+        'a KV v1 path with "data" below the first level must not be read as KV v2'
+    )
 
 
 def test_kv1_tag_whole_secret(vault_env):

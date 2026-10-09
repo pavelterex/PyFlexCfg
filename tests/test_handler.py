@@ -267,28 +267,31 @@ class TestTmpPath:
         assert os.getenv('PRECEDENCE_PROBE') == expected, f'got {os.getenv("PRECEDENCE_PROBE")!r}'
         assert Cfg.general.host == expected, f'the override must follow the same precedence, got {Cfg.general.host!r}'
 
-    @pytest.mark.parametrize('extra_file', [True, False], ids=['two .env files', 'one .env file'])
-    def test_env_files_more_than_one_warned(self, tmp_path: Path, monkeypatch, caplog, extra_file):
+    @pytest.mark.parametrize(
+        'second_file',
+        [
+            pytest.param('ENV_PROBE_SHARED=secret-b\n', id='same variable in both'),
+            pytest.param('ENV_PROBE_ONLY_B=secret-b\n', id='different variables'),
+            pytest.param('', id='empty second file'),
+        ],
+    )
+    def test_env_files_more_than_one_refused(self, tmp_path: Path, monkeypatch, second_file):
         for name in ('ENV_PROBE_SHARED', 'ENV_PROBE_ONLY_A', 'ENV_PROBE_ONLY_B'):
             monkeypatch.delenv(name, raising=False)
-        (tmp_path / 'app.env').write_text('ENV_PROBE_SHARED=secret-a\nENV_PROBE_ONLY_A=1\n')
-        if extra_file:
-            (tmp_path / 'backup.env').write_text('ENV_PROBE_SHARED=secret-b\nENV_PROBE_ONLY_B=1\n')
+        (tmp_path / 'app.env').write_text('ENV_PROBE_SHARED=secret-a\nENV_PROBE_ONLY_A=secret-a\n')
+        (tmp_path / 'backup.env').write_text(second_file)
         _write(tmp_path / 'general.yaml', 'key: value')
 
-        with caplog.at_level(logging.WARNING, logger='pyflexcfg'):
+        with pytest.raises(RuntimeError, match=r'\.env files') as exc_info:
             Cfg.reload_config(config_path=tmp_path)
-        warnings = [r.getMessage() for r in caplog.records if '.env files' in r.getMessage()]
+        msg = str(exc_info.value)
 
-        if not extra_file:
-            assert not warnings, f'a single .env file must not be warned about, got {warnings!r}'
-            return
-
-        assert len(warnings) == 1, f'expected one warning, got {warnings!r}'
-        for expected in ('app.env', 'backup.env', 'ENV_PROBE_SHARED'):
-            assert expected in warnings[0], f'{expected!r} is missing from the warning: {warnings[0]!r}'
-        for unexpected in ('ENV_PROBE_ONLY_A', 'ENV_PROBE_ONLY_B', 'secret-a', 'secret-b'):
-            assert unexpected not in warnings[0], f'{unexpected!r} must not be in the warning: {warnings[0]!r}'
+        for expected in ('app.env', 'backup.env'):
+            assert expected in msg, f'{expected!r} must be named in the error, got {msg!r}'
+        for value in ('secret-a', 'secret-b'):
+            assert value not in msg, f'{value!r} must not be in the error, got {msg!r}'
+        for name in ('ENV_PROBE_SHARED', 'ENV_PROBE_ONLY_A', 'ENV_PROBE_ONLY_B'):
+            assert name not in os.environ, f'{name} was applied although loading was refused'
 
     def test_loaded_yaml_dict_becomes_attrdict(self, tmp_path: Path):
         _write(tmp_path / 'general.yaml', 'nested:\n  key: value\n  inner:\n    deep: 42')

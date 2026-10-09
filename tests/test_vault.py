@@ -92,6 +92,8 @@ def test_vault_kv1_fetch_field(vault_env, mock_hvac):
     [
         pytest.param('secret/myapp/db#host', 'secret', 'myapp/db', id='default mount name'),
         pytest.param('kv/team/app#host', 'kv', 'team/app', id='custom mount name'),
+        pytest.param('secret/team/data/app#host', 'secret', 'team/data/app', id='nested data segment'),
+        pytest.param('secret/metadata/data/app#host', 'secret', 'metadata/data/app', id='data not first'),
     ],
 )
 def test_vault_kv1_splits_mount_from_path(vault_env, mock_hvac, path, mount, kv_path):
@@ -113,13 +115,21 @@ def test_vault_kv2_fetch_field(vault_env, mock_hvac):
     assert result == 'secret123'
 
 
-def test_vault_kv2_splits_mount_from_path(vault_env, mock_hvac):
+@pytest.mark.parametrize(
+    'path, kv_path',
+    [
+        pytest.param('secret/data/myapp/db#password', 'myapp/db', id='plain'),
+        pytest.param('secret/data/team/data/app#password', 'team/data/app', id='nested data segment'),
+    ],
+)
+def test_vault_kv2_splits_mount_from_path(vault_env, mock_hvac, path, kv_path):
     read_version = mock_hvac.Client.return_value.secrets.kv.v2.read_secret_version
     read_version.return_value = {'data': {'data': {'password': 'secret123'}}}
 
-    VaultProvider().fetch('secret/data/myapp/db#password')
+    VaultProvider().fetch(path)
 
-    read_version.assert_called_once_with(path='myapp/db', mount_point='secret')
+    read_version.assert_called_once_with(path=kv_path, mount_point='secret')
+    mock_hvac.Client.return_value.secrets.kv.v1.read_secret.assert_not_called()
 
 
 def test_vault_missing_field_error_omits_secret_values(vault_env, mock_hvac):

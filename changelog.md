@@ -12,6 +12,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with the 4-byte marker `PFLX` plus a version byte (base64 prefix `UEZMWA`). Existing CBC
   ciphertexts carry no marker and are **decrypted transparently**, but emit a `logging.WARNING` on
   every load; run `pyflexcfg encrypt` to migrate all values to AES-GCM and silence the warning.
+- **Only one `.env` file is allowed in the config root.** 2.x loaded every `*.env` file it found, in
+  an order the operating system decided, so a variable defined in two files had an unpredictable
+  value. Two or more files now raise `RuntimeError` naming them, on first load, on
+  `reload_config()` and in every `pyflexcfg` command. Merge them into one file before upgrading.
 
 ### Added
 
@@ -59,7 +63,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **HashiCorp Vault integration** (`!vault` tag). Install the optional extra `pyflexcfg[vault]`
   (`hvac` dependency). Path format: `mount/path#field` — the `#field` suffix selects a key from
   the secret's data dict; omit it to receive the whole dict as an `AttrDict`. KV v2 is detected
-  when the path contains `/data/`; otherwise KV v1 is assumed. The Vault client is created on the
+  when `data/` comes directly after the mount (`mount/data/…`); any other path, including one with
+  `data` further down, is read as KV v1. The Vault client is created on the
   first `!vault` tag hit and rebuilt whenever `VAULT_ADDR` or `VAULT_TOKEN` changes, so a reload
   after rotating the token uses the new one. A failed fetch raises with the secret path and the
   kind of failure only; the Vault client's message, which can hold the response body, is not
@@ -71,9 +76,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or dunder (`items`, `keys`, `__len__`) still load, but cannot be written as `Cfg.section.name`.
   Each load now logs one WARNING listing them with their paths and the reason, and pointing to item
   access (`Cfg.app['items']`, `getattr(Cfg, 'global')`).
-- **Warning for more than one `.env` file.** Every `*.env` file in the config root is loaded, in no
-  guaranteed order. When there is more than one, each load now logs a WARNING naming the files and
-  the variables defined in more than one of them. `pyflexcfg encrypt` refuses to run in that case.
 - **Key-length warning**: `AESCipher` emits `logging.WARNING` at instantiation if
   `len(PYFLEX_CFG_KEY) < 32`.
 - **`Required` class exported from the package root** (`from pyflexcfg import Required`). Useful
