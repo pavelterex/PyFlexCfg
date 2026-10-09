@@ -225,8 +225,9 @@ def test_encrypt_quoted_value_round_trips(tmp_path):
     assert loaded['other'] == 1, 'following key must survive'
 
 
-def test_encrypt_reads_key_from_env_file(tmp_path):
-    (tmp_path / 'secrets.env').write_text(f'PYFLEX_CFG_KEY={TEST_KEY}\n', encoding='utf-8')
+@pytest.mark.parametrize('filename', ['.env', 'secrets.env'])
+def test_encrypt_reads_key_from_env_file(tmp_path, filename):
+    (tmp_path / filename).write_text(f'PYFLEX_CFG_KEY={TEST_KEY}\n', encoding='utf-8')
     (tmp_path / 'app.yaml').write_text('secret: !encr myvalue\n', encoding='utf-8')
     result = _run('encrypt', config_root=tmp_path, cfg_key=None)
     encrypted = (tmp_path / 'app.yaml').read_text(encoding='utf-8').split('!encr ')[1].strip()

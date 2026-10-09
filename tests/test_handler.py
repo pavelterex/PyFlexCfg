@@ -241,6 +241,49 @@ class TestTmpPath:
 
         assert os.environ['VAULT_TOKEN'] == 'rotated-token', 'a value that came from the file may be rotated in it'
 
+    @pytest.mark.parametrize('filename', ['.env', 'app.env', 'settings.prod.env'])
+    def test_env_file_recognised_by_name_ending(self, tmp_path: Path, monkeypatch, filename):
+        monkeypatch.delenv('ENV_NAME_PROBE', raising=False)
+        (tmp_path / filename).write_text('ENV_NAME_PROBE=loaded\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        Cfg.reload_config(config_path=tmp_path)
+
+        assert os.getenv('ENV_NAME_PROBE') == 'loaded', f'{filename} was not loaded as a .env file'
+
+    @pytest.mark.parametrize('change', ['variable removed', 'file deleted'])
+    def test_env_file_removed_variable_dropped_on_reload(self, tmp_path: Path, monkeypatch, change):
+        for name in ('ENV_STALE_PROBE', 'ENV_KEPT_PROBE', 'CFG__GENERAL__KEY'):
+            monkeypatch.delenv(name, raising=False)
+        env_file = tmp_path / 'app.env'
+        env_file.write_text('ENV_STALE_PROBE=1\nENV_KEPT_PROBE=1\nCFG__GENERAL__KEY=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: from-yaml')
+        Cfg.reload_config(config_path=tmp_path)
+        assert Cfg.general.key == 'from-file', 'the file override must apply first'
+
+        if change == 'file deleted':
+            env_file.unlink()
+        else:
+            env_file.write_text('ENV_KEPT_PROBE=1\n')
+        Cfg.reload_config()
+
+        assert 'ENV_STALE_PROBE' not in os.environ, 'a variable removed from the .env file stayed in the environment'
+        assert Cfg.general.key == 'from-yaml', 'an override removed from the .env file was applied again'
+        assert os.environ.get('ENV_KEPT_PROBE') == (None if change == 'file deleted' else '1')
+
+    def test_env_file_removed_variable_kept_when_process_changed_it(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('ENV_STALE_PROBE', raising=False)
+        env_file = tmp_path / 'app.env'
+        env_file.write_text('ENV_STALE_PROBE=from-file\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+        Cfg.reload_config(config_path=tmp_path)
+
+        monkeypatch.setenv('ENV_STALE_PROBE', 'set-by-the-application')
+        env_file.unlink()
+        Cfg.reload_config()
+
+        assert os.environ['ENV_STALE_PROBE'] == 'set-by-the-application', 'a value the process set itself was removed'
+
     def test_env_file_selects_env_layer(self, tmp_path: Path, monkeypatch):
         monkeypatch.delenv('PYFLEX_ENV', raising=False)
         (tmp_path / 'settings.env').write_text('PYFLEX_ENV=dev\n')
@@ -266,6 +309,18 @@ class TestTmpPath:
 
         assert os.getenv('PRECEDENCE_PROBE') == expected, f'got {os.getenv("PRECEDENCE_PROBE")!r}'
         assert Cfg.general.host == expected, f'the override must follow the same precedence, got {Cfg.general.host!r}'
+
+    def test_env_files_bare_dot_env_counts_towards_limit(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv('ENV_PROBE_SHARED', raising=False)
+        (tmp_path / '.env').write_text('ENV_PROBE_SHARED=a\n')
+        (tmp_path / 'app.env').write_text('ENV_PROBE_SHARED=b\n')
+        _write(tmp_path / 'general.yaml', 'key: value')
+
+        with pytest.raises(RuntimeError, match=r'\.env files') as exc_info:
+            Cfg.reload_config(config_path=tmp_path)
+
+        assert "'.env'" in str(exc_info.value) or '(.env,' in str(exc_info.value), f'got {exc_info.value}'
+        assert 'ENV_PROBE_SHARED' not in os.environ, 'nothing may be applied when loading is refused'
 
     @pytest.mark.parametrize(
         'second_file',

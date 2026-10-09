@@ -176,7 +176,13 @@ A single `*.env` file placed directly inside the config root (not in a subdirect
 [`python-dotenv`](https://pypi.org/project/python-dotenv/) *before* YAML parsing. This lets you set
 `PYFLEX_CFG_KEY`, `CFG__…` overrides, and other environment variables without touching the shell.
 The file is not parsed as YAML and not exposed as a `Cfg.<name>` attribute. It may have any name
-ending in `.env` (`.env`, `app.env`, `secrets.env`).
+ending in `.env`: the conventional bare `.env`, or `app.env`, `secrets.env` and so on.
+
+The file is re-read on every `Cfg.reload_config()`, and PyFlexCfg keeps the environment in step with
+it. A variable you remove from the file, or all of them if you delete the file, is removed from the
+environment again on the next reload, so a dropped `CFG__*` override or credential stops applying.
+The one exception is a variable your own code has changed since PyFlexCfg set it: that value is
+yours and is left alone.
 
 > **Only one `.env` file is allowed in the config root.**
 >
@@ -200,8 +206,10 @@ ending in `.env` (`.env`, `app.env`, `secrets.env`).
 > one file, and remove or rename any other file ending in `.env`. If you need per-environment
 > values, use `PYFLEX_ENV` layers or set the variables in the process environment.
 >
-> **Upgrading from 2.x:** version 2 loaded every `.env` file it found. If your config root has more
-> than one, merge them into a single file before upgrading.
+> **Upgrading from 2.x:** version 2 loaded every `.env` file it found, except one named exactly
+> `.env`, which it silently ignored. Version 3 loads that file too and counts it towards the limit.
+> If your config root has more than one file ending in `.env`, merge them into a single file before
+> upgrading; and if it has a bare `.env` that was never taking effect, check its contents first.
 
 ### Order of precedence
 

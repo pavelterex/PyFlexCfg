@@ -76,8 +76,11 @@ Precedence when a setting is given in several places, lowest to highest:
 YAML files  <  active PYFLEX_ENV layer  <  CFG__* set by the process  <  CFG__* in a .env file
 ```
 
-The single `*.env` file in the config root is loaded first and **overrides the process environment**
+The single `.env` file in the config root is loaded first and **overrides the process environment**
 for the variables it defines (`CFG__*`, `PYFLEX_ENV`, …); the values are written into `os.environ`.
+Any file whose name ends in `.env` counts, the bare `.env` included. On `reload_config()` a variable
+no longer in the file (or a deleted file) is removed from `os.environ` again, unless the process
+changed that variable in the meantime.
 
 **At most one `.env` file may exist in the config root.** Two or more raise `RuntimeError` naming
 them, on first load, on `reload_config()` and in every `pyflexcfg` command; nothing is read into the

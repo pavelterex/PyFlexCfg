@@ -110,7 +110,7 @@ class HandlerMeta(type):
                     cls.load_config(item, dct[item.name])
                 case _ if item.is_file() and item.suffix in {'.yml', '.yaml'}:
                     cls._load_yaml_from_file(dct, item)
-                case _ if item.is_file() and item.suffix == '.env':
+                case _ if _is_env_file(item):
                     continue  # already handled by load_env_files
                 case _:
                     logger.debug('Skipping unsupported item: %s', item)
@@ -118,22 +118,26 @@ class HandlerMeta(type):
     @classmethod
     def load_env_files(cls, config_path: Path) -> None:
         """
-        Load the `*.env` file directly inside `config_path` into the environment.
+        Load the `.env` file directly inside `config_path` into the environment.
 
-        At most one such file may exist. Its values replace variables the process
-        already set, with one exception: for the credential variables in
-        `_PROTECTED_ENV_VARS` a different value in the file is refused, so neither
-        source silently wins.
+        A file counts when its name ends in `.env`, the bare `.env` included, and at
+        most one may exist. Its values replace variables the process already set,
+        with one exception: for the credential variables in `_PROTECTED_ENV_VARS` a
+        different value in the file is refused, so neither source silently wins.
+
+        Variables an earlier call wrote and the file no longer sets are removed
+        again, unless the process has changed them since.
 
         Raises:
             RuntimeError: More than one `.env` file is present, or the file gives a
                 protected variable a value that differs from the one the process
-                provides. Nothing is read into the environment in either case.
+                provides. The environment is left untouched in either case.
         """
         if not config_path.is_dir():
             return
 
-        env_files = sorted(item for item in config_path.iterdir() if item.is_file() and item.suffix == '.env')
+        env_files = sorted(item for item in config_path.iterdir() if _is_env_file(item))
+
         if len(env_files) > 1:
             names = ', '.join(item.name for item in env_files)
             raise RuntimeError(
@@ -141,21 +145,31 @@ class HandlerMeta(type):
                 'several would load in no guaranteed order, leaving shared variables undefined.',
             )
 
-        for env_file in env_files:
-            values = dotenv_values(env_file)
-            conflicts = sorted(name for name, value in values.items() if _contradicts_process(name, value))
-            if conflicts:
-                raise RuntimeError(
-                    'Set by the process and, to a different value, in a .env file: '
-                    f'{", ".join(f"{name} ({env_file.name})" for name in conflicts)}. '
-                    'Define each of these variables in one place only.',
-                )
+        values = dotenv_values(env_files[0]) if env_files else {}
+        conflicts = sorted(name for name, value in values.items() if _contradicts_process(name, value))
 
-            for name, value in values.items():
-                if value is not None:
-                    os.environ[name] = value
-                    _env_file_values[_env_name(name)] = value
-            logger.debug('Loaded env file: %s', env_file)
+        if conflicts:
+            raise RuntimeError(
+                'Set by the process and, to a different value, in a .env file: '
+                f'{", ".join(f"{name} ({env_files[0].name})" for name in conflicts)}. '
+                'Define each of these variables in one place only.',
+            )
+
+        current = {_env_name(name) for name, value in values.items() if value is not None}
+        for name, written in list(_env_file_values.items()):
+            if name not in current:
+                # Only a value still exactly as written here is this module's to remove.
+                if os.environ.get(name) == written:
+                    del os.environ[name]
+                del _env_file_values[name]
+
+        for name, value in values.items():
+            if value is not None:
+                os.environ[name] = value
+                _env_file_values[_env_name(name)] = value
+
+        if env_files:
+            logger.debug('Loaded env file: %s', env_files[0])
 
     @classmethod
     def resolve_project_root(cls, custom_root: bool = False) -> Path | None:
@@ -262,6 +276,11 @@ def _contradicts_process(name: str, file_value: str | None) -> bool:
 def _env_name(name: str) -> str:
     """Normalise a variable name the way the OS compares it: case-insensitively on Windows."""
     return name.upper() if os.name == 'nt' else name
+
+
+def _is_env_file(item: Path) -> bool:
+    """Tell whether `item` is a dotenv file. By name ending, since `Path('.env').suffix` is empty."""
+    return item.is_file() and item.name.endswith('.env')
 
 
 def _unreachable_entries(value: Any, path: str, *, top_level: bool = False) -> Iterator[str]:
